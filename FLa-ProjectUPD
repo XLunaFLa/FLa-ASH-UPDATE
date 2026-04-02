@@ -7109,175 +7109,182 @@ function StartRaidLoop()
  -- sehingga kalau user ganti setting di tengah, iterasi berikutnya langsung ikut
  local function ResolveEntry()
  if #RAID_ID_LIST == 0 then return nil end
- -- [FIX] Prune expired entries sebelum resolve
+
  local _now0 = os.time()
  local _pruned0 = false
  for rid, ent in pairs(RAID_LIVE) do
- if ent.endTime and ent.endTime < (_now0 - 10) then
- RAID_LIVE[rid] = nil; _pruned0 = true
- end
+  if ent.endTime and ent.endTime < (_now0 - 10) then
+   RAID_LIVE[rid] = nil; _pruned0 = true
+  end
  end
  if _pruned0 then
- if RebuildRaidList then pcall(RebuildRaidList) end
+  if RebuildRaidList then pcall(RebuildRaidList) end
  end
  if #RAID_ID_LIST == 0 then return nil end
 
- local runeOn = RAID.runeEnabled
- -- [FIX] runeMapTarget hanya berlaku kalau toggle Rune Map ON
+ local pm        = RAID.pickMode or "default"
+ local runeOn    = RAID.runeEnabled
  local runeTarget = runeOn and RAID.runeMapTarget or 0
- -- [FIX] Pick Rank INDEPENDEN dari Rune Map ON/OFF
- -- hasPick aktif kalau ada grade dipilih, terlepas dari runeEnabled
- local hasPick = next(RAID.runeGrades) ~= nil
- local diff = RAID.difficulty
+ local hasPick   = next(RAID.runeGrades) ~= nil
 
- -- Helper: pilih entry dari list berdasarkan difficulty/pickMode
+ local function pickLowest(list)
+  table.sort(list, function(a, b) return a.mapId < b.mapId end)
+  return list[1]
+ end
+
  local function pickByDiff(list)
- if #list == 0 then return nil end
- table.sort(list, function(a,b) return a.mapId < b.mapId end)
- local pm = RAID.pickMode or "default"
- -- Default -> round-robin ascending (terkecil->terbesar->reset ke terkecil)
- if pm == "default" then
- -- Maju ke index berikutnya
- _defaultRRIdx = _defaultRRIdx + 1
- -- Kalau sudah melewati jumlah list, reset ke 1
- if _defaultRRIdx > #list then _defaultRRIdx = 1 end
- return list[_defaultRRIdx]
- end
- -- Easy -> selalu map terkecil
- if pm == "easy" then
- return list[1]
- end
- -- Hard -> map terbesar
- if pm == "hard" then
- return list[#list]
- end
- -- By Map -> ambil dari preferMaps, fallback terkecil
- if pm == "bymap" then
- for _, r in ipairs(list) do
- if RAID.preferMaps[r.mapId - 50000] then return r end
- end
- return list[1]
- end
- -- By Rank -> sudah dihandle di hasPick block sebelumnya
- if pm == "byrank" then return list[1] end
- -- Manual -> preferMaps dulu, fallback terkecil
- if pm == "manual" then
- for _, r in ipairs(list) do
- if RAID.preferMaps[r.mapId - 50000] then return r end
- end
- return list[1]
- end
- -- Fallback dari diff lama (kalau RAID.difficulty masih dipakai)
- if diff == "hard" then return list[#list] end
- if diff == "medium" then return list[math.ceil(#list/2)] end
- return list[1]
+  if #list == 0 then return nil end
+  table.sort(list, function(a, b) return a.mapId < b.mapId end)
+  if pm == "default" then
+   _defaultRRIdx = _defaultRRIdx + 1
+   if _defaultRRIdx > #list then _defaultRRIdx = 1 end
+   return list[_defaultRRIdx]
+  end
+  if pm == "easy"   then return list[1] end
+  if pm == "hard"   then return list[#list] end
+  if pm == "byrank" then return list[1] end
+  if pm == "bymap" or pm == "manual" then
+   for _, r in ipairs(list) do
+    if RAID.preferMaps[r.mapId - 50000] then return r end
+   end
+   return list[1]
+  end
+  return list[1]
  end
 
- --  KASUS 1: Rune Map ON + Map spesifik dipilih 
- -- Difficulty = kendaraan (raidId untuk CreateRaidTeam)
- -- Map tujuan tetap di-override UseRaidItem -> runeTarget
- if runeOn and runeTarget >= 1 and runeTarget <= 18 then
- -- [v250 FIX] Guard: kalau tidak ada raid aktif di game sama sekali,
- -- langsung return nil agar masuk waiting loop.
- -- Tanpa ini, RAID_ID_LIST yang masih berisi entry lama (belum di-prune)
- -- akan membuat ResolveEntry return raidEntry yang tidak valid,
- -- sehingga waiting loop dilewati dan script terus paksa masuk map
- -- via UseRaidItem meski tidak ada raid aktif -> loop masuk-keluar tak berguna.
  if not IsRaidLiveInGame() then
- RAID_LIVE = {}
- RAID_ID_LIST = {}
- _defaultRRIdx = 0 -- reset RR saat RAID habis
- if RebuildRaidList then pcall(RebuildRaidList) end
- return nil
+  RAID_LIVE = {}
+  RAID_ID_LIST = {}
+  _defaultRRIdx = 0
+  if RebuildRaidList then pcall(RebuildRaidList) end
+  return nil
  end
 
- -- [FIX v256] RUNE MAP ON = map di-override UseRaidItem
- -- raidId hanya "kendaraan" (tiket masuk) - map TIDAK PENTING
- -- Difficulty TIDAK berlaku di sini - ambil raid APAPUN yang ada
+ if pm == "manual" then
+  local hasPreferMaps = next(RAID.preferMaps) ~= nil
+  local hasPreferRank = hasPick
+  local hasPreferRune = runeOn and runeTarget >= 1 and runeTarget <= 18
 
- if hasPick then
- -- PICK RANK aktif: cari raid APAPUN yang grade-nya cocok
- -- Tidak peduli map berapa - yang penting grade cocok
- local GRADE_ORDER = {"E","D","C","B","A","S","SS","G","N","M","M+","M++"}
- local gradeRank = {}
- for i, g in ipairs(GRADE_ORDER) do gradeRank[g] = i end
+  if hasPreferRank then
+   for _, r in ipairs(RAID_ID_LIST) do
+    local mn = r.mapId - 50000
+    local grade = GetBestGrade(mn)
+    local rankMatch = grade and RAID.runeGrades[grade] == true
 
- local matched = {}
- for _, r in ipairs(RAID_ID_LIST) do
- local grade = GetBestGrade(r.mapId - 50000)
- if grade and RAID.runeGrades[grade] == true then
- table.insert(matched, r)
- end
- end
- if #matched > 0 then
- -- Sort berdasarkan grade terkecil dulu
- table.sort(matched, function(a, b)
- local ga = GetBestGrade(a.mapId - 50000) or "?"
- local gb = GetBestGrade(b.mapId - 50000) or "?"
- local ra = gradeRank[ga] or 99
- local rb = gradeRank[gb] or 99
- return ra < rb
- end)
- return matched[1]
- end
- -- Tidak ada grade cocok -> TETAP ambil raid apapun sebagai kendaraan
- -- (Difficulty tidak relevan - map di-override UseRaidItem)
- return RAID_ID_LIST[1]
+    if rankMatch then
+     local mapMatch = hasPreferMaps and RAID.preferMaps[mn] == true
+
+     if mapMatch then
+      if hasPreferRune and mn == runeTarget then
+       -- FASE 3: Map + Rank PERSIS cocok. Batalkan Rune, alihkan ke UP/DOWN Rank.
+       RAID.runeEnabled = false
+       return r
+      else
+       -- FASE 2 (Map + Rank match, bukan peta rune target): kunci portal, fire rune.
+       return r
+      end
+     else
+      -- FASE 2: Rank match, map beda. Kunci portal ini, rune override peta.
+      return r
+     end
+    end
+   end
+
+   -- FASE 1: Preferred Rank BELUM ADA di lobby.
+   -- Jangan diam. Cari Preferred Maps dengan ID terkecil untuk farming.
+   if hasPreferMaps then
+    local farmCandidates = {}
+    for _, r in ipairs(RAID_ID_LIST) do
+     if RAID.preferMaps[r.mapId - 50000] then
+      table.insert(farmCandidates, r)
+     end
+    end
+    if #farmCandidates > 0 then
+     return pickLowest(farmCandidates)
+    end
+   end
+
+   -- Preferred Maps juga kosong: farming map terkecil di lobby.
+   return pickLowest(RAID_ID_LIST)
+  end
+
+  if hasPreferMaps then
+   local mapCandidates = {}
+   for _, r in ipairs(RAID_ID_LIST) do
+    if RAID.preferMaps[r.mapId - 50000] then
+     table.insert(mapCandidates, r)
+    end
+   end
+   if #mapCandidates > 0 then return pickLowest(mapCandidates) end
+   return nil
+  end
+
+  if hasPreferRune then
+   for _, r in ipairs(RAID_ID_LIST) do
+    if (r.mapId - 50000) == runeTarget then return r end
+   end
+   return RAID_ID_LIST[1]
+  end
+
+  return pickByDiff(RAID_ID_LIST)
  end
 
- -- Rune Map tanpa Pick Rank: ambil raid APAPUN sebagai kendaraan
- -- (Difficulty tidak relevan - map di-override UseRaidItem)
- return RAID_ID_LIST[1]
+ if runeOn and runeTarget >= 1 and runeTarget <= 18 then
+  if hasPick then
+   local matched = {}
+   for _, r in ipairs(RAID_ID_LIST) do
+    local grade = GetBestGrade(r.mapId - 50000)
+    if grade and RAID.runeGrades[grade] == true then
+     table.insert(matched, r)
+    end
+   end
+   if #matched > 0 then
+    table.sort(matched, function(a, b)
+     local ga = GetBestGrade(a.mapId - 50000) or "?"
+     local gb = GetBestGrade(b.mapId - 50000) or "?"
+     local ra = GRADE_RANK[ga] or 99
+     local rb = GRADE_RANK[gb] or 99
+     return ra < rb
+    end)
+    return matched[1]
+   end
+  end
+  return RAID_ID_LIST[1]
  end
 
- --  KASUS 2: Rune Map OFF 
- -- [v253 FIX] Jika Pick Rank aktif: filter grade dulu, lalu terapkan
- -- difficulty (Easy/Hard) di dalam daftar yang sudah difilter.
- -- [v262 FIX] Tambah handling bymap dan byrank eksplisit
- local pm = RAID.pickMode
-
- -- By Map: filter berdasarkan preferMaps saja
  if pm == "bymap" and next(RAID.preferMaps) ~= nil then
- local mapMatched = {}
- for _, r in ipairs(RAID_ID_LIST) do
- if RAID.preferMaps[r.mapId - 50000] then
- table.insert(mapMatched, r)
- end
- end
- if #mapMatched > 0 then
- table.sort(mapMatched, function(a,b) return a.mapId < b.mapId end)
- return mapMatched[1]
- end
- -- Tidak ada map cocok -> tunggu (return nil)
- return nil
+  local mapMatched = {}
+  for _, r in ipairs(RAID_ID_LIST) do
+   if RAID.preferMaps[r.mapId - 50000] then
+    table.insert(mapMatched, r)
+   end
+  end
+  if #mapMatched > 0 then return pickLowest(mapMatched) end
+  return nil
  end
 
- -- By Rank / hasPick: filter grade dulu, SKIP Ascension Tower
  if hasPick then
- local matched2 = {}
- for _, r in ipairs(RAID_ID_LIST) do
- -- [v272] By Rank & Manual: skip AT, prioritas Normal Raid
- if pm == "byrank" or pm == "manual" then
- local _isAT = (r.mapId >= 50019 and r.mapId <= 50036) or (r.raidId and r.raidId >= 935001)
- if _isAT then continue end
- end
- local grade = GetBestGrade(r.mapId - 50000)
- if grade and RAID.runeGrades[grade] == true then
- table.insert(matched2, r)
- end
- end
- if #matched2 > 0 then
- local chosen = pickByDiff(matched2)
- if chosen then return chosen end
- end
- -- Tidak ada grade cocok di cache -> kalau byrank, tunggu raid dengan grade tsb
- if pm == "byrank" then return nil end
- -- Mode lain: fallback ke pickByDiff semua
+  local matched2 = {}
+  for _, r in ipairs(RAID_ID_LIST) do
+   local _skipEntry = false
+   if pm == "byrank" then
+    local _isAT = (r.mapId >= 50019 and r.mapId <= 50036) or (r.raidId and r.raidId >= 935001)
+    if _isAT then _skipEntry = true end
+   end
+   if not _skipEntry then
+    local grade = GetBestGrade(r.mapId - 50000)
+    if grade and RAID.runeGrades[grade] == true then
+     table.insert(matched2, r)
+    end
+   end
+  end
+  if #matched2 > 0 then
+   local chosen = pickByDiff(matched2)
+   if chosen then return chosen end
+  end
+  if pm == "byrank" then return nil end
  end
 
- -- Semua mode selain byrank (Default/Easy/Hard/ByMap/ByRank/Manual)
- -- langsung pilih dari RAID_ID_LIST sesuai logika pickByDiff
- -- [FIX v265] Ganti PickRaidByDifficulty() yang tidak ada
  return pickByDiff(RAID_ID_LIST)
  end
 
