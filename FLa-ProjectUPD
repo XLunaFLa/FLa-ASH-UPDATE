@@ -6612,32 +6612,74 @@ function ParseChatLine(text)
  if type(text) ~= "string" or #text < 3 then return end
  text = text:gsub("<[^>]+>",""):gsub("[\r\n]+"," "):match("^%s*(.-)%s*$") or text
 
- -- RAID: "The MaFissure appeared in 6,Orc Palace [B]"
+ -- RAID Normal: "The MaFissure appeared in 6,Orc Palace [B]"
+ -- RAID Ascension: "The MaFissure appeared in Ascension Tower 16 - [Monarch] Antares+1 [A]"
  if text:find("MaFissure",1,true) and text:find("appeared",1,true) then
- local mapStr, rest = text:match("appeared in (%d+),(.+)")
+
+ -- Helper: ekstrak grade dari teks
+ local function extractGrade(t)
+ return t:match("%[M%+%+%]") and "M++" or t:match("%[M%+%]") and "M+" or
+ t:match("%[SS%]") and "SS" or t:match("%[XM%]") and "XM" or
+ t:match("%[ULT%]") and "ULT" or t:match("%[GOD%]") and "GOD" or
+ t:match("%[([EDCBAGSNMedcbagsn])%]") or (t:find("%[M%]") and "M")
+ end
+
+ -- Cek apakah format Ascension: "appeared in Ascension Tower <num>"
+ local isAscension = text:find("Ascension Tower", 1, true) and true or false
+ local mapNum, rest, grade
+
+ if isAscension then
+ -- Format: "appeared in Ascension Tower 16 - [Monarch] Antares+1 [A]"
+ mapNum = tonumber(text:match("Ascension Tower (%d+)"))
+ rest = text:match("Ascension Tower %d+%s*[-]?%s*(.+)") or ""
+ grade = extractGrade(rest) or extractGrade(text)
+ if not grade and text:find("Monarch",1,true) then grade = "?" end
+ else
+ -- Format normal: "appeared in 6,Orc Palace [B]"
+ local mapStr
+ mapStr, rest = text:match("appeared in (%d+),(.+)")
  if not mapStr then mapStr, rest = text:match("appeared in (%d+) (.+)") end
  if mapStr then
- local mapNum = tonumber(mapStr)
- local grade = rest:match("%[M%+%+%]") and "M++" or rest:match("%[M%+%]") and "M+" or rest:match("%[SS%]") and "SS" or rest:match("%[XM%]") and "XM" or rest:match("%[ULT%]") and "ULT" or rest:match("%[GOD%]") and "GOD" or rest:match("%[([EDCBAGSNMedcbagsn])%]") or (rest:find("%[M%]") and "M")
- if not grade then
- grade = text:match("%[M%+%+%]") and "M++" or text:match("%[M%+%]") and "M+" or text:match("%[SS%]") and "SS" or text:match("%[XM%]") and "XM" or text:match("%[ULT%]") and "ULT" or text:match("%[([EDCBAGSNMedcbagsn])%]") or (text:find("%[M%]") and "M")
- end
+ mapNum = tonumber(mapStr)
+ grade = extractGrade(rest or "") or extractGrade(text)
  if not grade and text:find("Monarch",1,true) then grade = "?" end
+ end
+ end
+
  if mapNum and grade then
- local prev = _runeGradeCache[mapNum]
+ -- Update grade cache (untuk raid normal, key = mapNum; Ascension pakai key negatif agar tidak bentrok)
+ local cacheKey = isAscension and (-mapNum) or mapNum
+ local prev = _runeGradeCache[cacheKey]
  local cleanPrev = prev and prev:match("^([^%s%(]+)") or prev
  local shouldUpdate = not prev or cleanPrev == "?" or (GRADE_RANK[grade] and GRADE_RANK[cleanPrev] and GRADE_RANK[grade] > GRADE_RANK[cleanPrev])
- if shouldUpdate then _runeGradeCache[mapNum] = grade end
- -- [Ascension Mode] Tandai entry RAID_LIVE apakah tipe Ascension dari nama notifikasi
- local isAscension = (rest and rest:find("Ascension", 1, true)) and true or false
+ if shouldUpdate then _runeGradeCache[cacheKey] = grade end
+
+ if isAscension then
+ -- [Ascension Mode] Buat entry Ascension di RAID_LIVE dengan id unik negatif
+ -- mapId pakai 50000 + mapNum (sama dengan normal) tapi flag isAscension = true
+ local ascId = -(50000 + mapNum) -- id negatif agar tidak bentrok dengan raid normal
+ RAID_LIVE[ascId] = {
+ raidId = ascId,
+ mapId = 50000 + mapNum,
+ spawnName = "RE1001",
+ rank = 0,
+ grade = grade,
+ isAscension = true,
+ endTime = os.time() + 300, -- estimasi 5 menit window
+ label = "Ascension Tower "..mapNum.." ["..grade.."]",
+ }
+ if RebuildRaidList then pcall(RebuildRaidList) end
+ else
+ -- Update isAscension = false untuk entry normal di RAID_LIVE
  for rid, entry in pairs(RAID_LIVE) do
  if entry.mapId and (entry.mapId - 50000) == mapNum then
- entry.isAscension = isAscension
+ entry.isAscension = false
  end
  end
+ end
+
  if not _whSilent then TriggerWebhookDebounce() end
  if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
- end
  end
  return
  end
@@ -7086,25 +7128,41 @@ _WH.raidConns = {}
 RebuildRaidList = function()
  local sorted = {}
  for _, e in pairs(RAID_LIVE) do
-  -- [FIX] Skip AT entries yang mungkin lolos (mapNum 20+)
-  if e.mapId and (e.mapId - 50000) <= 20 then
+  local mn = e.mapId and (e.mapId - 50000) or 0
+  if e.isAscension then
+   -- Ascension entry (raidId negatif): selalu masuk tanpa filter mapNum
+   table.insert(sorted, e)
+  elseif e.mapId and mn >= 1 and mn <= 20 then
+   -- Normal entry: filter mapNum 1-20
    table.insert(sorted, e)
   end
  end
- -- Sort by mapId ascending (map 1 -> map 18)
- table.sort(sorted, function(a, b) return (a.mapId or 0) < (b.mapId or 0) end)
+ -- Sort: normal entries by mapId ascending, Ascension entries setelahnya
+ table.sort(sorted, function(a, b)
+  if a.isAscension ~= b.isAscension then
+   return not a.isAscension -- normal dulu
+  end
+  return (a.mapId or 0) < (b.mapId or 0)
+ end)
  RAID_ID_LIST = {}
  for _, e in ipairs(sorted) do
+ local mn = e.mapId and (e.mapId - 50000) or 0
+ local lbl
+ if e.isAscension then
+  lbl = "Ascension Tower "..mn.." ["..( e.grade or "?").."]"
+ else
+  lbl = "Map "..mn.." - "..(MAP_NAMES[mn] or ("Map "..mn)).." - "..(RANK_LABEL[e.rank] or ("["..( e.spawnName or "?").."]")).." (ID:"..e.raidId..")"
+ end
  table.insert(RAID_ID_LIST, {
- label = "Map "..(e.mapId-50000).." - "..(MAP_NAMES[e.mapId-50000] or ("Map "..(e.mapId-50000))).." - "..(RANK_LABEL[e.rank] or ("["..e.spawnName.."]")).." (ID:"..e.raidId..")",
+ label = lbl,
  id = e.raidId,
  rank = e.rank,
  mapId = e.mapId,
  spawnName = e.spawnName,
+ isAscension = e.isAscension,
  })
  end
  if _raidIdRefreshCb then pcall(_raidIdRefreshCb) end
- -- Kirim webhook setiap RAID_LIVE berubah
  if _webhookEnabled and _webhookUrl ~= "" then
  TriggerWebhookDebounce()
  end
@@ -7539,6 +7597,14 @@ end
 -- Scan enemy/boss di workspace
 function GetRaidEnemies()
  local list = {}
+ -- [FIX] Filter enemy berdasarkan proximity ke spawn point map yang sedang aktif
+ -- Mencegah enemy sisa dari map sebelumnya ikut terdeteksi sebagai target
+ local activeMapId = RAID and RAID.serverMapId
+ local spawnPos = activeMapId and RAID_SPAWN_POS and RAID_SPAWN_POS[activeMapId]
+ -- Radius filter: enemy harus dalam 2000 studs dari spawn point map aktif
+ -- Jika tidak ada spawnPos (map tidak dikenal), tidak filter posisi
+ local MAX_DIST = 2000
+
  for _, fname in ipairs({"Enemys","Enemy","Enemies","Bosses","Boss","RaidBoss","RaidEnemys"}) do
  local folder = workspace:FindFirstChild(fname)
  if folder then
@@ -7548,7 +7614,17 @@ function GetRaidEnemies()
  local hrp = e:FindFirstChild("HumanoidRootPart")
  local hum = e:FindFirstChildOfClass("Humanoid")
  if g and hrp and hum and hum.Health > 0 then
+ -- [FIX] Validasi posisi enemy terhadap spawn point map aktif
+ local valid = true
+ if spawnPos then
+ local dist = (hrp.Position - spawnPos).Magnitude
+ if dist > MAX_DIST then
+ valid = false -- enemy ini dari map lain, skip
+ end
+ end
+ if valid then
  table.insert(list, {guid=g, hrp=hrp, model=e})
+ end
  end
  end
  end
@@ -7780,13 +7856,16 @@ local function ResolveEntry()
                 -- [Ascension Mode] Filter helper: cek apakah entry sesuai mode
                 local function _ascFilter(entry)
                     if not entry then return false end
-                    local live = entry.id and RAID_LIVE[entry.id]
-                    local isAsc = live and live.isAscension == true
+                    -- Baca isAscension langsung dari RAID_ID_LIST entry (sudah diisi RebuildRaidList)
+                    -- Fallback ke RAID_LIVE jika tidak ada di entry
+                    local isAsc = entry.isAscension == true
+                    if not isAsc then
+                        local live = entry.id and RAID_LIVE[entry.id]
+                        isAsc = live and live.isAscension == true
+                    end
                     if RAID.ascensionMode then
-                        -- Mode Ascension: hanya entry yang ditandai isAscension
                         return isAsc
                     else
-                        -- Mode Normal: hanya entry yang BUKAN Ascension (atau belum ada info)
                         return not isAsc
                     end
                 end
