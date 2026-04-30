@@ -3327,14 +3327,6 @@ end
  _visAutoHide = _autoHideVis
  _autoHideRow.Name = "ZZZ_AutoHide" -- Trik aman! Memaksa posisinya di bawah Count RYB (LayoutOrder 1) tanpa merusak/menggeser LayoutOrder tombol lain.
 
- -- Toggle Auto Collect GOLD & ITEM
- local _autoCollectRow, _autoCollectSet, _autoCollectVis = ToggleRow(p, "AUTO COLLECT GOLD & ITEM", "TP & collect semua gold/item ke player", 2, function(on)
-     DoAutoCollectGoldItem(on)
- end)
- _autoCollectRow.LayoutOrder = 2 -- eksplisit setelah dibuat
- _setAutoCollectToggle = _autoCollectSet
- _visAutoCollect = _autoCollectVis
-
  -- Toggle UI untuk Disable All Animations & Damage Text
 local _animRow, _animSet, _animVis = ToggleRow(p, "DISABLE ALL ANIMATIONS", "Matikan animasi hero & teks damage (Anti-Lag)", 3, function(on)
     DoDisableAllAnimations(on)
@@ -4425,6 +4417,20 @@ _animRow.Name = "ZZZ_DisableAnim"
   }):Play()
  end
 
+end
+
+
+-- ============================================================
+-- AUTO COLLECT GOLD & ITEM TOGGLE (inject ke panel MAIN)
+-- ============================================================
+do
+ local p = Panels["main"]
+ local row, setFn, visFn = ToggleRow(p, "AUTO COLLECT GOLD & ITEM", "TP & collect semua gold/item ke player", 2, function(on)
+     DoAutoCollectGoldItem(on)
+ end)
+ row.LayoutOrder = 2
+ _setAutoCollectToggle = setFn
+ _visAutoCollect = visFn
 end
 
 
