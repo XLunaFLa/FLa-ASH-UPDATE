@@ -10335,54 +10335,73 @@ StartSiegeLoop = function()
             SiegeStatus("[>>] Masuk "..d.name.."...", Color3.fromRGB(180,120,255))
             if SIEGE.dot then SIEGE.dot.BackgroundColor3 = Color3.fromRGB(180,120,255) end
 
-            local RE = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
-            if RE then
-                local enterRe = RE:FindFirstChild("EnterCityRaidMap")
-                if not enterRe then
+            -- Helper lokal: kirim seluruh sequence remote untuk masuk siege
+            -- Dipanggil pertama kali + di-retry tiap 4 detik jika belum masuk
+            local function _fireSiegeEntry()
+                local _RE = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
+                if not _RE then return false end
+                local enterRe = _RE:FindFirstChild("EnterCityRaidMap")
+                if not enterRe then return false end
+                -- Step 1: EnterCityRaidMap (daftarkan player ke city raid di server)
+                pcall(function() enterRe:FireServer(d.cityRaidId) end)
+                task.wait(0.8)
+                if not SIEGE.running then return false end
+                -- Step 2: GetRaidTeamInfos (sync tim)
+                local grtRe = _RE:FindFirstChild("GetRaidTeamInfos")
+                if grtRe then task.spawn(function() pcall(function() grtRe:InvokeServer() end) end) end
+                task.wait(0.3)
+                -- Step 3: StartLocalPlayerTeleport ke tpMapId (50201-50205) -> yang bawa player masuk
+                local stpRe = _RE:FindFirstChild("StartLocalPlayerTeleport")
+                if stpRe then pcall(function() stpRe:FireServer({mapId=d.tpMapId}) end) end
+                task.wait(0.5)
+                -- Step 4: EquipHeroWithData
+                local eqRe = _RE:FindFirstChild("EquipHeroWithData")
+                if eqRe then pcall(function() eqRe:FireServer() end) end
+                task.wait(0.3)
+                -- Step 5: LocalPlayerTeleportSuccess (konfirmasi ke server)
+                local ltpRe = _RE:FindFirstChild("LocalPlayerTeleportSuccess")
+                if ltpRe then task.spawn(function() pcall(function() ltpRe:InvokeServer() end) end) end
+                task.wait(0.3)
+                -- Step 6: GetRaidTeamInfos kedua (final sync)
+                local grtRe2 = _RE:FindFirstChild("GetRaidTeamInfos")
+                if grtRe2 then task.spawn(function() pcall(function() grtRe2:InvokeServer() end) end) end
+                task.wait(0.3)
+                return true
+            end
+
+            -- Cek remote tersedia sebelum mulai
+            do
+                local _RE0 = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
+                if not (_RE0 and _RE0:FindFirstChild("EnterCityRaidMap")) then
                     _siegeInterrupt = false; MODE:Release("siege")
                     SiegeStatus("[!] EnterCityRaidMap Not Found - retry 5s...", Color3.fromRGB(255,100,60))
                     task.wait(5); break
                 end
-                -- [FIX v39] EnterCityRaidMap dikirim SETELAH baseMap confirm
-                pcall(function() enterRe:FireServer(d.cityRaidId) end)
-                task.wait(0.8) -- [FIX v39] diperbesar 0.5->0.8 agar server proses join sebelum TP
-                if not SIEGE.running then _siegeInterrupt = false; MODE:Release("siege"); break end
-
-                local grtRe = RE:FindFirstChild("GetRaidTeamInfos")
-                if grtRe then task.spawn(function() pcall(function() grtRe:InvokeServer() end) end) end
-                task.wait(0.3)
-
-                local stpRe = RE:FindFirstChild("StartLocalPlayerTeleport")
-                if stpRe then pcall(function() stpRe:FireServer({mapId=d.tpMapId}) end) end
-                task.wait(0.5) -- [FIX v39] diperbesar 0.3->0.5
-
-                local eqRe = RE:FindFirstChild("EquipHeroWithData")
-                if eqRe then pcall(function() eqRe:FireServer() end) end
-                task.wait(0.3)
-
-                local ltpRe = RE:FindFirstChild("LocalPlayerTeleportSuccess")
-                if ltpRe then task.spawn(function() pcall(function() ltpRe:InvokeServer() end) end) end
-                task.wait(0.3)
-
-                local grtRe2 = RE:FindFirstChild("GetRaidTeamInfos")
-                if grtRe2 then task.spawn(function() pcall(function() grtRe2:InvokeServer() end) end) end
-                task.wait(0.3)
             end
             if not SIEGE.running then _siegeInterrupt = false; MODE:Release("siege"); break end
 
-            -- [FIX v39] Deteksi masuk: HANYA via MapId workspace (50201-50204) atau GetSiegeEnemies
-            -- CityRaidEnter DIHAPUS dari cek - ada di baseMap juga, menyebabkan false-positive!
+            -- Fire entry sequence pertama kali
+            if not _fireSiegeEntry() then _siegeInterrupt = false; MODE:Release("siege"); break end
+            if not SIEGE.running then _siegeInterrupt = false; MODE:Release("siege"); break end
+
+            -- Tunggu konfirmasi masuk siege, retry fire tiap 4 detik jika belum masuk (max 15s total)
             SiegeStatus("[FLa] Waiting Enter Siege...", Color3.fromRGB(180,120,255))
             local _entered = false
             local _entWait = 0
-            while not _entered and _entWait < 12 and SIEGE.running do
-                task.wait(0.5); _entWait = _entWait + 0.5
-                -- Cek 1: MapId sudah di range Siege (50201-50204) = KONFIRMASI PALING RELIABLE
+            local _sinceLastFire = 2.5 -- sudah fire di atas, beri jeda 4s sebelum retry pertama
+            while not _entered and _entWait < 15 and SIEGE.running do
+                task.wait(0.5); _entWait = _entWait + 0.5; _sinceLastFire = _sinceLastFire + 0.5
+                -- Cek 1: MapId sudah di range Siege (50201-50205)
                 local inSiege, _ = IsInSiegeMap()
                 if inSiege then _entered = true; break end
-                -- Cek 2: Musuh Siege sudah spawn di workspace
+                -- Cek 2: Musuh Siege sudah spawn
                 if #GetSiegeEnemies() > 0 then _entered = true; break end
-                -- [FIX v39] TIDAK lagi cek CityRaidEnter - bisa ada di baseMap (false positive)
+                -- Retry fire jika sudah 4 detik sejak fire terakhir dan belum masuk
+                if _sinceLastFire >= 4.0 then
+                    SiegeStatus("[~] Retry Enter "..d.name.."...", Color3.fromRGB(255,200,60))
+                    _sinceLastFire = 0
+                    if not _fireSiegeEntry() then break end
+                end
             end
 
             if not _entered then
