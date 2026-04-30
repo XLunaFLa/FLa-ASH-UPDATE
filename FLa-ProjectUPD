@@ -3515,13 +3515,13 @@ _animRow.Name = "ZZZ_DisableAnim"
 
  -- Divider
  local divMain = Frame(p, C.BORD, UDim2.new(1,0,0,1))
- divMain.LayoutOrder=5; divMain.BackgroundTransparency=0.42
+ divMain.LayoutOrder=6; divMain.BackgroundTransparency=0.42
 
  -- ============================================================
  -- AUTO SELL WEAPON [v56b FIX] + WEAPON FILTER DROPDOWN
  -- Persistent listener di UpdateWeapon.OnClientEvent
  -- Dropdown pakai DDLayer (sistem existing) - no MaxSize bug
- -- LayoutOrder: swRow=5, swDropCard=6, swStatusCard=7
+ -- LayoutOrder: swRow=6, swDropCard=7, swStatusCard=8
  --              dgRow=8, dgSliderCard=9 (geser +2)
  -- ============================================================
 
@@ -3718,7 +3718,7 @@ _animRow.Name = "ZZZ_DisableAnim"
 
  -- -- Toggle row ----------------------------------------------
  local swRow = Frame(p, C.SURFACE, UDim2.new(1,0,0,44))
- swRow.LayoutOrder = 5; Corner(swRow,10); Stroke(swRow, C.BORD, 1.5, 0.3)
+ swRow.LayoutOrder = 6; Corner(swRow,10); Stroke(swRow, C.BORD, 1.5, 0.3)
  local swLbl = Label(swRow, "AUTO SELL WEAPON", 13, C.TXT, Enum.Font.GothamBold)
  swLbl.Size = UDim2.new(1,-68,0,20); swLbl.Position = UDim2.new(0,14,0.5,-10)
  local swPill = Btn(swRow, C.PILL_OFF, UDim2.new(0,52,0,30))
@@ -3728,7 +3728,7 @@ _animRow.Name = "ZZZ_DisableAnim"
 
  -- -- Dropdown filter card (LayoutOrder 6) --------------------
  local swDropCard = Frame(p, C.BG3, UDim2.new(1,0,0,0))
- swDropCard.LayoutOrder = 6
+ swDropCard.LayoutOrder = 7
  swDropCard.AutomaticSize = Enum.AutomaticSize.Y
  Corner(swDropCard, 10); Stroke(swDropCard,C.BORD, 1.5,0.4)
  Padding(swDropCard,6,6,10,10)
@@ -3754,7 +3754,7 @@ _animRow.Name = "ZZZ_DisableAnim"
 
  -- -- Status bar (LayoutOrder 7) -------------------------------
  local swStatusCard = Frame(p, C.BG3, UDim2.new(1,0,0,26))
- swStatusCard.LayoutOrder = 7; Corner(swStatusCard,6); Stroke(swStatusCard,C.BORD, 1.5,0.4)
+ swStatusCard.LayoutOrder = 8; Corner(swStatusCard,6); Stroke(swStatusCard,C.BORD, 1.5,0.4)
  local swDot = Frame(swStatusCard, Color3.fromRGB(100,100,100), UDim2.new(0,8,0,8))
  swDot.Position = UDim2.new(0,7,0.5,-4); Corner(swDot,4)
  local swStatusLbl = Label(swStatusCard,"Idle",10,C.TXT3,Enum.Font.GothamBold)
@@ -4159,7 +4159,7 @@ _animRow.Name = "ZZZ_DisableAnim"
 
  -- UI 
  local dgRow = Frame(p, C.SURFACE, UDim2.new(1,0,0,44))
- dgRow.LayoutOrder = 8; Corner(dgRow,10); Stroke(dgRow, C.BORD, 1.5, 0.3)
+ dgRow.LayoutOrder = 9; Corner(dgRow,10); Stroke(dgRow, C.BORD, 1.5, 0.3)
  local dgLbl = Label(dgRow, "AUTO DECOMPOSE GEMS", 13, C.TXT, Enum.Font.GothamBold)
  dgLbl.Size = UDim2.new(1,-68,0,20); dgLbl.Position = UDim2.new(0,14,0.5,-10)
  local dgPill = Btn(dgRow, C.PILL_OFF, UDim2.new(0,52,0,30))
@@ -4169,7 +4169,7 @@ _animRow.Name = "ZZZ_DisableAnim"
 
  -- Slider Max Level 
  local dgSliderCard = Frame(p, C.BG3, UDim2.new(1,0,0,44))
- dgSliderCard.LayoutOrder = 9; Corner(dgSliderCard, 10); Stroke(dgSliderCard,C.BORD, 1.5,0.4)
+ dgSliderCard.LayoutOrder = 10; Corner(dgSliderCard, 10); Stroke(dgSliderCard,C.BORD, 1.5,0.4)
  Padding(dgSliderCard,6,6,10,10)
  New("UIListLayout",{Parent=dgSliderCard,FillDirection=Enum.FillDirection.Vertical,Padding=UDim.new(0,4)})
 
@@ -4425,10 +4425,10 @@ end
 -- ============================================================
 do
  local p = Panels["main"]
- local row, setFn, visFn = ToggleRow(p, "AUTO COLLECT GOLD & ITEM", "TP & collect semua gold/item ke player", 2, function(on)
+ local row, setFn, visFn = ToggleRow(p, "AUTO COLLECT GOLD & ITEM", "TP & collect semua gold/item ke player", 5, function(on)
      DoAutoCollectGoldItem(on)
  end)
- row.LayoutOrder = 2
+ row.LayoutOrder = 5
  _setAutoCollectToggle = setFn
  _visAutoCollect = visFn
 end
