@@ -8791,19 +8791,16 @@ local function ResolveEntry()
  end
  end)
  if _lastChance and RAID.running and not RAID._raidDone then
- -- Dapat dari last chance scan
+ -- Dapat dari last chance scan, set boss dan lanjut ke serangan
  boss = _lastChance
  RaidStatusUpdate("[!] Boss found (last chance): " .. boss.model.Name, Color3.fromRGB(255,200,50))
- -- lanjut ke serangan via goto workaround: set boss dan re-enter attack block
- -- karena Lua tidak punya goto, kita re-trigger logika serangan inline
- goto BOSS_ATTACK
  end
- if RAID.running then
+ -- Jika masih tidak ada boss setelah last chance, keluar
+ if not boss and RAID.running then
  RaidStatusUpdate("[FLa] Boss not found (30s) - Go Out...", Color3.fromRGB(255,150,50))
  task.wait(3)
  end
  end -- if boss
- ::BOSS_ATTACK::
  elseif RAID.running and not RAID._raidDone then
  -- Auto Kill Boss OFF - tunggu event ChallengeRaidsSuccess max 5 menit
  local _wt = 0
