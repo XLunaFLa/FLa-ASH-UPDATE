@@ -12302,22 +12302,34 @@ StartSiegeLoop = function()
             if not SIEGE.running then _siegeInterrupt = false; MODE:Release("siege"); break end
 
             -- Tunggu konfirmasi masuk siege, retry fire tiap 4 detik jika belum masuk (max 15s total)
+            -- [FIX] Cek masuk siege DULU di awal setiap iterasi sebelum timer retry
+            -- Mencegah _fireSiegeEntry() dipanggil ulang saat player sudah di dalam siege
             SiegeStatus("[FLa] Waiting Enter Siege...", Color3.fromRGB(180,120,255))
             local _entered = false
             local _entWait = 0
-            local _sinceLastFire = 2.5 -- sudah fire di atas, beri jeda 4s sebelum retry pertama
+            local _sinceLastFire = 0 -- [FIX] mulai dari 0, jeda penuh 4s sebelum retry pertama
             while not _entered and _entWait < 15 and SIEGE.running do
                 task.wait(0.5); _entWait = _entWait + 0.5; _sinceLastFire = _sinceLastFire + 0.5
-                -- Cek 1: MapId sudah di range Siege (50201-50205)
+                -- [FIX] Cek masuk DULU setiap iterasi - jangan retry jika sudah masuk
                 local inSiege, _ = IsInSiegeMap()
                 if inSiege then _entered = true; break end
-                -- Cek 2: Musuh Siege sudah spawn
                 if #GetSiegeEnemies() > 0 then _entered = true; break end
-                -- Retry fire jika sudah 4 detik sejak fire terakhir dan belum masuk
+                -- Retry fire HANYA jika belum masuk DAN timer sudah habis
+                -- [FIX] Double guard: pastikan benar-benar belum masuk sebelum fire ulang
                 if _sinceLastFire >= 4.0 then
+                    local _stillOut, _ = IsInSiegeMap()
+                    if _stillOut then
+                        -- Ternyata sudah masuk di cek ulang - jangan fire
+                        _entered = true; break
+                    end
+                    if #GetSiegeEnemies() > 0 then _entered = true; break end
                     SiegeStatus("[~] Retry Enter "..d.name.."...", Color3.fromRGB(255,200,60))
                     _sinceLastFire = 0
                     if not _fireSiegeEntry() then break end
+                    -- [FIX] Cek langsung setelah fire selesai (fire butuh ~2.5s, player mungkin sudah masuk)
+                    local inSiegeAfterFire, _ = IsInSiegeMap()
+                    if inSiegeAfterFire then _entered = true; break end
+                    if #GetSiegeEnemies() > 0 then _entered = true; break end
                 end
             end
 
