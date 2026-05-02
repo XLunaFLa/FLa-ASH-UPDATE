@@ -11442,7 +11442,18 @@ StartDungeonLoop = function()
  end
 
  -- Auto hide reward popup
- DungeonHideRewardPopup()
+ -- [FIX] Hide reward popup - pakai pcall guard karena popup mungkin tidak ada
+ pcall(function()
+  local playerGui = LP and LP.PlayerGui
+  if not playerGui then return end
+  for _, gui in ipairs(playerGui:GetChildren()) do
+   if gui:IsA("ScreenGui") or gui:IsA("BillboardGui") then
+    local reward = gui:FindFirstChild("RewardPanel") or gui:FindFirstChild("Reward")
+     or gui:FindFirstChild("RewardUI") or gui:FindFirstChild("ItemReward")
+    if reward and reward.Visible then reward.Visible = false end
+   end
+  end
+ end)
 
  -- Reset towerState ke WaitPhase (server akan update via ChangeTowerState)
  DUNGEON.towerState = 1
