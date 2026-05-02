@@ -1297,23 +1297,12 @@ _setSpeedSlider = nil  -- Player: WalkSpeed slider setter
 _setGemLevelSlider = nil -- Main: Gem Level slider setter
 
 -- ============================================================
--- [v50] MODE DISPATCHER - Strict Mutex (No Override While Inside Feature)
--- ============================================================
--- ATURAN BARU:
---   1. Hanya 1 fitur yang boleh "memegang" lock sekaligus.
---   2. Tidak ada override / serobot selama fitur masih aktif.
---   3. Fitur lain yang ingin masuk harus ANTRI di queue.
---   4. Lock baru dilepas SETELAH player benar-benar kembali ke
---      Map Lobby (MapId 50001-50020). Jika tidak dalam 60 detik
---      setelah Release() dipanggil, paksa idle.
---   5. Priority queue: dungeon(4) > asc(3.5) > siege(3) > raid(2) > ma(1)
---      Urutan di queue diurutkan berdasarkan priority, lalu waktu masuk.
+-- [v51] MODE DISPATCHER - dari v49 (stabil) + fix _readMapId
 -- ============================================================
 MODE = {
- current  = "idle",   -- nama fitur yang sedang pegang lock
- _locked  = false,    -- true = fitur sedang di dalam map (HARD LOCK)
- _queue   = {},       -- antrian: { name, priority, ts }
+ current = "idle", -- "idle"|"ma"|"raid"|"siege"|"dungeon"|"asc"
  priority = { dungeon=4, asc=3.5, siege=3, raid=2, ma=1, idle=0 },
+ _prev = {}, -- stack: simpan mode yang diinterrupt, untuk resume
 }
 
 -- [FIX v51] Helper: baca MapId dari workspace.Maps
@@ -1331,117 +1320,39 @@ local function _readMapId()
  return (ok and type(result) == "number") and result or 0
 end
 
--- Helper: apakah player saat ini di Map Lobby (50001-50020)?
-function MODE:_inLobby()
- local wm = _readMapId()
- if type(wm) == "number" and wm >= 50001 and wm <= 50020 then
-  return true
- end
- -- Fallback: jika Maps folder kosong/tidak terbaca dan tidak sedang inMap
- if wm == 0 then
-  local raidInMap = RAID and RAID.inMap
-  local siegeInMap = SIEGE and SIEGE.inMap
-  if not raidInMap and not siegeInMap then
-   return true
-  end
- end
- return false
-end
-
 function MODE:_p(name)
  return self.priority[name] or 0
 end
 
--- Masukkan ke antrian (hindari duplikat nama yang sama)
-function MODE:_enqueue(name)
- for _, q in ipairs(self._queue) do
-  if q.name == name then return end -- sudah ada di antrian
- end
- table.insert(self._queue, { name=name, priority=self:_p(name), ts=os.clock() })
- -- Urutkan: priority tertinggi dulu, jika sama -> yang lebih dulu masuk duluan
- table.sort(self._queue, function(a, b)
-  if a.priority ~= b.priority then return a.priority > b.priority end
-  return a.ts < b.ts
- end)
+function MODE:IsHigherPriority(incoming)
+ return self:_p(incoming) > self:_p(self.current)
 end
 
--- Hapus dari antrian
-function MODE:_dequeue(name)
- for i, q in ipairs(self._queue) do
-  if q.name == name then table.remove(self._queue, i); return end
- end
-end
-
--- REQUEST: minta lock.
---   Jika slot kosong DAN player di lobby -> langsung dapat.
---   Jika slot kosong tapi player belum di lobby -> masuk antrian, tunggu.
---   Jika slot isi -> masuk antrian, tunggu.
---   Return true jika dapat lock, false jika running=false sebelum dapat.
-function MODE:Request(name, runningRef)
- -- Fast path: tidak ada yang pakai dan sudah di lobby
- if self.current == "idle" and not self._locked and self:_inLobby() then
+-- Request: boleh masuk kalau slot kosong ATAU priority lebih tinggi
+function MODE:Request(name)
+ if self.current == "idle" or self:IsHigherPriority(name) then
   self.current = name
-  self._locked = true
   return true
  end
- -- Masuk antrian
- self:_enqueue(name)
- -- Spin-wait sampai giliran kita (max ~infinite, caller boleh break via runningRef)
- while true do
-  -- Cek apakah caller masih running (opsional, jika diberikan sebagai table {val=bool})
-  if runningRef and not runningRef.val then
-   self:_dequeue(name)
-   return false
-  end
-  -- Giliran kita = slot idle, player di lobby, dan kita di depan antrian
-  local front = self._queue[1]
-  if self.current == "idle" and not self._locked and self:_inLobby()
-     and front and front.name == name then
-   self:_dequeue(name)
-   self.current = name
-   self._locked = true
-   return true
-  end
-  task.wait(0.4)
- end
+ return false
 end
 
--- LOCK: tandai bahwa fitur sudah benar-benar masuk ke dalam map.
--- Setelah Lock(), tidak ada siapapun yang bisa ambil slot sampai Release().
-function MODE:Lock(name)
- if self.current == name then
-  self._locked = true
- end
-end
-
--- RELEASE: lepas lock. Player HARUS sudah kembali ke lobby sebelum slot bisa dipakai lagi.
--- Jika player belum di lobby, tunggu max 60 detik lalu paksa idle.
+-- Release: hanya release kalau kamu yang pegang
 function MODE:Release(name)
- if self.current ~= name then return end
- -- Tunggu player kembali ke lobby (max 60 detik)
- local _waited = 0
- while not self:_inLobby() and _waited < 60 do
-  task.wait(0.5); _waited = _waited + 0.5
- end
- self._locked = false
- self.current = "idle"
-end
-
--- FORCE RELEASE: lepas paksa (untuk emergency / stop script).
-function MODE:ForceRelease(name)
- if self.current == name or name == nil then
-  self._locked = false
+ if self.current == name then
   self.current = "idle"
  end
 end
 
--- ForceSet: alias untuk kompatibilitas kode lama (dungeon).
--- Sekarang hanya bisa force jika player di lobby atau slot idle.
+-- ForceRelease: lepas paksa (untuk emergency / stop script)
+function MODE:ForceRelease(name)
+ if self.current == name or name == nil then
+  self.current = "idle"
+ end
+end
+
+-- ForceSet: override tanpa cek (untuk dungeon yang priority max)
 function MODE:ForceSet(name)
- -- Jika slot sudah milik kita, tidak perlu apa-apa
- if self.current == name then return end
- -- Force ambil slot (dungeon punya priority tertinggi)
- self._locked = true
  self.current = name
 end
 
@@ -1449,21 +1360,11 @@ end
 -- Kembalikan true kalau berhasil, false kalau timeout
 function MODE:WaitAndRequest(name, timeout)
  local t = 0
- local limit = timeout or 60
- self:_enqueue(name)
- while t < limit do
-  local front = self._queue[1]
-  if self.current == "idle" and not self._locked and self:_inLobby()
-     and front and front.name == name then
-   self:_dequeue(name)
-   self.current = name
-   self._locked = true
-   return true
-  end
+ local limit = timeout or 30
+ while not self:Request(name) and t < limit do
   task.wait(0.5); t = t + 0.5
  end
- self:_dequeue(name)
- return false
+ return self.current == name
 end
 
 -- IsHeld: cek apakah fitur tertentu yang sedang pegang lock
@@ -1473,8 +1374,30 @@ end
 
 -- IsIdle: cek apakah slot kosong
 function MODE:IsIdle()
- return self.current == "idle" and not self._locked
+ return self.current == "idle"
 end
+
+-- _inLobby: cek posisi player via workspace.Maps (dipakai oleh guard attack loop)
+function MODE:_inLobby()
+ local wm = _readMapId()
+ if type(wm) == "number" and wm >= 50001 and wm <= 50020 then
+  return true
+ end
+ -- Fallback: jika Maps tidak terbaca dan tidak sedang inMap -> anggap lobby
+ if wm == 0 then
+  local raidInMap = RAID and RAID.inMap
+  local siegeInMap = SIEGE and SIEGE.inMap
+  if not raidInMap and not siegeInMap then return true end
+ end
+ return false
+end
+
+-- _enqueue/_dequeue: stub agar tidak crash jika dipanggil dari kode lama
+function MODE:_enqueue(name) end
+function MODE:_dequeue(name) end
+-- _locked stub: kompatibilitas kode lama yang cek MODE._locked
+MODE._locked = false
+MODE._queue  = {}
 
 --  Alias getter (baca-saja) 
 -- ============================================================
@@ -1984,7 +1907,7 @@ function AttackLoop_Mass(onStatus)
   -- Blok Siege (50201+), Raid (50101+), Tower (50300+), dan map lain di luar range
   do
    local ok, wm = pcall(function()
-    return workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
+    return _readMapId()
    end)
    if ok and type(wm) == "number" then
     if wm < 50001 or wm > 50020 then
@@ -8093,29 +8016,18 @@ function StartAscensionLoop()
     -- ASC akan antri dan menunggu sampai player kembali ke Map Lobby (50001-50020)
     -- dan slot bebas (MODE.current == "idle").
     if not MODE:IsHeld("asc") then
-     AscStatusUpdate("[Q] Menunggu giliran masuk (antri)...", Color3.fromRGB(255,200,60))
-     -- Tambahkan ke antrian dan spin-wait
-     MODE:_enqueue("asc")
+     AscStatusUpdate("[Q] Menunggu giliran masuk...", Color3.fromRGB(255,200,60))
+     local _tw = 0
      while ASC.running do
-      local front = MODE._queue[1]
-      if MODE.current == "idle" and not MODE._locked and MODE:_inLobby()
-         and front and front.name == "asc" then
-       MODE:_dequeue("asc")
-       MODE.current = "asc"
-       MODE._locked = true
-       break
-      end
-      -- Tampilkan status antrian
-      local qPos = 1
-      for i, q in ipairs(MODE._queue) do if q.name == "asc" then qPos = i; break end end
+      if MODE:Request("asc") then break end
       if MODE.current ~= "idle" then
-       AscStatusUpdate(("[Q#%d] Menunggu %s selesai + lobby..."):format(qPos, MODE.current), Color3.fromRGB(255,160,60))
+       AscStatusUpdate(("[Q] Menunggu %s selesai..."):format(MODE.current), Color3.fromRGB(255,160,60))
       else
-       AscStatusUpdate("[Q] Menunggu player kembali ke Lobby...", Color3.fromRGB(255,200,60))
+       AscStatusUpdate("[Q] Menunggu slot bebas...", Color3.fromRGB(255,200,60))
       end
-      task.wait(0.5)
+      task.wait(0.5); _tw = _tw + 0.5
      end
-     if not ASC.running then MODE:_dequeue("asc"); break end
+     if not ASC.running then MODE:Release("asc"); break end
      if not MODE:IsHeld("asc") then break end
      AscStatusUpdate("> Giliran ASC! Siap masuk...", C.ACC3)
      task.wait(0.1)
@@ -8132,13 +8044,13 @@ function StartAscensionLoop()
     end
 
     -- [v50] Guard tambahan: pastikan player di lobby sebelum masuk
-    local curWm = workspace:GetAttribute("MapId") or 0
+    local curWm = _readMapId()
     if not (curWm >= 50001 and curWm <= 50020) then
      AscStatusUpdate("[||] Menunggu player di Lobby (MapId 50001-50020)...", Color3.fromRGB(255,140,0))
      local _wLobby = 0
      while ASC.running and _wLobby < 60 do
       task.wait(0.5); _wLobby = _wLobby + 0.5
-      curWm = workspace:GetAttribute("MapId") or 0
+      curWm = _readMapId()
       if curWm >= 50001 and curWm <= 50020 then break end
      end
      if not ASC.running then break end
@@ -8242,7 +8154,7 @@ function StartAscensionLoop()
     while not _tpOk and _tpW < 15 and ASC.running and not _cfail do
      task.wait(0.3); _tpW = _tpW + 0.3
      pcall(function()
-      local wm = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId")
+      local wm = _readMapId()
       if wm and wm >= 50301 and wm <= 50326 then _tpOk = true end
      end)
      if not _tpOk and #GetRaidEnemies() > 0 then _tpOk = true end
@@ -8565,7 +8477,7 @@ function StartAscensionLoop()
      while ASC.running and not _ascDone and _wt < 300 do
       task.wait(1); _wt = _wt + 1
       -- Guard keluar Tower
-      local wm = workspace:GetAttribute("MapId") or 0
+      local wm = _readMapId()
       if wm == 0 or (wm >= 50001 and wm <= 50028) then break end
      end
     end
@@ -8608,7 +8520,7 @@ function StartAscensionLoop()
     local _exitTry = 0
     local function _inAscArea()
      local ok, wm = pcall(function()
-      return workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or 0
+      return _readMapId() or 0
      end)
      return (ok and wm >= 50301 and wm <= 50326)
     end
@@ -8628,14 +8540,13 @@ function StartAscensionLoop()
     do
      local _lobWait = 0
      while ASC.running and _lobWait < 30 do
-      local _wm3 = workspace:GetAttribute("MapId") or 0
+      local _wm3 = _readMapId()
       if _wm3 >= 50001 and _wm3 <= 50020 then break end
       task.wait(0.5); _lobWait = _lobWait + 0.5
      end
     end
     -- Lepas lock MODE - fitur lain boleh masuk sekarang
-    MODE._locked = false
-    MODE.current = "idle"
+    MODE:Release("asc")
 
     -- [v50] STEP 6: Cooldown 14s (sama persis dengan RAID, scan tetap jalan)
     for cd = 14, 1, -1 do
@@ -8687,7 +8598,6 @@ function StartAscensionLoop()
   ASC._rrIdx  = 0
   -- [v50] Pastikan lock MODE dilepas saat ASC stop
   if MODE:IsHeld("asc") then MODE:ForceRelease("asc") end
-  MODE:_dequeue("asc")
   AscStatusUpdate("Auto Ascension STOP", Color3.fromRGB(160,148,135))
   if ASC.dot then ASC.dot.BackgroundColor3 = Color3.fromRGB(100,100,100) end
  end)
@@ -9006,27 +8916,17 @@ function StartRaidLoop()
  -- RAID tidak akan masuk jika fitur lain (dungeon/asc/siege) sedang aktif di dalam map.
  -- RAID akan antri dan menunggu player kembali ke Lobby (50001-50020) dan slot bebas.
  if not MODE:IsHeld("raid") then
-  RaidStatusUpdate("[Q] Menunggu giliran masuk (antri)...", Color3.fromRGB(255,200,60))
-  MODE:_enqueue("raid")
+  RaidStatusUpdate("[Q] Menunggu giliran masuk...", Color3.fromRGB(255,200,60))
   while RAID.running do
-   local front = MODE._queue[1]
-   if MODE.current == "idle" and not MODE._locked and MODE:_inLobby()
-      and front and front.name == "raid" then
-    MODE:_dequeue("raid")
-    MODE.current = "raid"
-    MODE._locked = true
-    break
-   end
-   local qPos = 1
-   for i, q in ipairs(MODE._queue) do if q.name == "raid" then qPos = i; break end end
+   if MODE:Request("raid") then break end
    if MODE.current ~= "idle" then
-    RaidStatusUpdate(("[Q#%d] Menunggu %s selesai + lobby..."):format(qPos, MODE.current), Color3.fromRGB(255,160,60))
+    RaidStatusUpdate(("[Q] Menunggu %s selesai..."):format(MODE.current), Color3.fromRGB(255,160,60))
    else
-    RaidStatusUpdate("[Q] Menunggu player kembali ke Lobby...", Color3.fromRGB(255,200,60))
+    RaidStatusUpdate("[Q] Menunggu slot bebas...", Color3.fromRGB(255,200,60))
    end
    task.wait(0.5)
   end
-  if not RAID.running then MODE:_dequeue("raid"); break end
+  if not RAID.running then MODE:Release("raid"); break end
   if not MODE:IsHeld("raid") then break end
   RaidStatusUpdate("> Giliran RAID! Siap masuk...", C.ACC3)
   task.wait(0.1)
@@ -9358,7 +9258,7 @@ local function ResolveEntry()
      break
  end
  
- local currentWm = workspace:GetAttribute("MapId") or 0
+ local currentWm = _readMapId()
  -- [FIX] Blokir Auto Raid saat di dalam Map Siege, Dungeon, atau Ascension Tower (50301-50326)
  if (currentWm >= 50201 and currentWm <= 50204) or currentWm == 50303 or (currentWm >= 50301 and currentWm <= 50326) then
      if currentWm >= 50301 and currentWm <= 50326 then
@@ -9568,7 +9468,7 @@ local function ResolveEntry()
  while not _tpOk and _tpWait < 15 and RAID.running do
   task.wait(0.3); _tpWait = _tpWait + 0.3
   pcall(function()
-   local wMapId = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
+   local wMapId = _readMapId()
    if wMapId then
     if RAID.serverMapId and wMapId == RAID.serverMapId then
      _mapIdOk = true
@@ -10078,7 +9978,7 @@ local function ResolveEntry()
  local function _inRaidArea()
  local ok = false
  pcall(function()
- local wm = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
+ local wm = _readMapId()
  if wm then
  ok = (wm >= 50101 and wm <= 50118)
  end
@@ -10150,7 +10050,7 @@ local function ResolveEntry()
             if (SIEGE and (SIEGE.inMap or SIEGE.teleporting)) or (DUNGEON and DUNGEON.inMap) then
                 isBusy = true
             end
-            local mapId = workspace:GetAttribute("MapId") or 0
+            local mapId = _readMapId()
             if (mapId >= 50201 and mapId <= 50204) or mapId == 50303 then
                 isBusy = true
             end
@@ -12059,7 +11959,7 @@ local _siegeWakeup = nil
 
 local function IsInSiegeMap()
     local ok, wm = pcall(function()
-        return workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
+        return _readMapId()
     end)
     if ok and type(wm) == "number" then
         if wm >= 50201 and wm <= 50205 then return true, wm end
@@ -12167,7 +12067,7 @@ local function SiegeAttackV2_Independent(onStatus, baseMapId)
     local _confirmedInSiege = false
     local function isBackAtBase()
         local ok, wm = pcall(function()
-            return workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
+            return _readMapId()
         end)
         if ok and type(wm) == "number" then
             -- Track: player sudah masuk siege map?
@@ -12213,7 +12113,7 @@ local function SiegeAttackV2_Independent(onStatus, baseMapId)
     while wt < 10 and SIEGE.running and SIEGE.inMap do
         -- Track konfirmasi masuk siege
         pcall(function()
-            local wm = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
+            local wm = _readMapId()
             if type(wm) == "number" and wm >= 50201 and wm <= 50205 then _confirmedInSiege = true end
         end)
         local enemies = GetSiegeEnemies()
@@ -12259,7 +12159,7 @@ local function SiegeAttackV2_Independent(onStatus, baseMapId)
         -- Mencegah Siege terus menyerang musuh di portal basemap setelah keluar dari Siege map
         do
             local _ok, _wm = pcall(function()
-                return workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
+                return _readMapId()
             end)
             if _ok and type(_wm) == "number" then
                 if _wm >= 50001 and _wm <= 50020 then
@@ -12450,16 +12350,17 @@ StartSiegeLoop = function()
                     pcall(function() RE.LocalTp:FireServer({mapId = baseMapId}) end)
                     
                     -- [FIX v39] Timeout diperbesar: 1s -> 5s (Map 7/10/13 butuh lebih lama load)
+                    -- [FIX v51] Pakai _readMapId() agar baca dari workspace.Maps
                     local tpWait = 0
                     while tpWait < 5 and SIEGE.running do
                         task.wait(0.5); tpWait = tpWait + 0.5
-                        local curMap = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
+                        local curMap = _readMapId()
                         if curMap == baseMapId then break end
                     end
-                    local curMapNow = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
+                    local curMapNow = _readMapId()
                     if curMapNow == baseMapId then
                         SiegeStatus(("[OK] TP %d sukses, stabilize..."):format(baseMapId), Color3.fromRGB(80,220,80))
-                        task.wait(0.5) -- beri waktu server register posisi player di map
+                        task.wait(0.5)
                     else
                         SiegeStatus(("[!] TP %d belum confirm (%s), lanjut..."):format(baseMapId, tostring(curMapNow)), Color3.fromRGB(255,140,0))
                     end
@@ -12834,7 +12735,7 @@ end
 
 local function IsInDungeonMap()
  local ok, wm = pcall(function()
- return workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
+ return _readMapId()
  end)
  if ok and type(wm) == "number" then
  if wm == DUNGEON_MAP_ID then return true, wm end
@@ -13159,27 +13060,18 @@ StartDungeonLoop = function()
  -- MODE:_locked akan prevent entry jika fitur lain sedang di dalam map.
  -- 
  if not MODE:IsHeld("dungeon") then
-  DungeonStatus("[Q] Menunggu slot bebas (antri priority max)...", Color3.fromRGB(255,160,60))
-  MODE:_enqueue("dungeon")
+  DungeonStatus("[Q] Menunggu slot bebas...", Color3.fromRGB(255,160,60))
   local _dWait = 0
   while DUNGEON.running do
-   local front = MODE._queue[1]
-   if MODE.current == "idle" and not MODE._locked and MODE:_inLobby()
-      and front and front.name == "dungeon" then
-    MODE:_dequeue("dungeon")
-    MODE.current = "dungeon"
-    MODE._locked = true
-    break
-   end
+   if MODE:Request("dungeon") then break end
    if MODE.current ~= "idle" then
     DungeonStatus(("[Q] Menunggu %s selesai..."):format(MODE.current), Color3.fromRGB(255,160,60))
    else
-    DungeonStatus("[Q] Menunggu player kembali ke Lobby...", Color3.fromRGB(255,200,60))
+    DungeonStatus("[Q] Menunggu slot bebas...", Color3.fromRGB(255,200,60))
    end
    task.wait(0.5); _dWait = _dWait + 0.5
   end
-  MODE:_dequeue("dungeon") -- cleanup jika masih di queue
-  if not DUNGEON.running then break end
+  if not DUNGEON.running then MODE:Release("dungeon"); break end
   if not MODE:IsHeld("dungeon") then break end
   DungeonStatus("> Giliran Dungeon! Masuk...", Color3.fromRGB(180,120,255))
   task.wait(0.1)
@@ -13424,7 +13316,7 @@ local function ST2Status(msg, color)
 end
 
 -- [v283] ST2: track mapId aktual via EnterRaidsUpdateInfo (sama seperti RAID system)
--- workspace:GetAttribute("MapId") tidak reliable - game update via remote event ini
+-- _readMapId() tidak reliable - game update via remote event ini
 local _st2CurrentMapId = nil  -- diisi oleh listener di bawah
 
 -- Pasang listener EnterRaidsUpdateInfo untuk ST2 (standalone, tidak ganggu RAID)
@@ -13444,7 +13336,7 @@ end)
 local function ST2IsInMap()
     -- Sumber 1: cek workspace MapId via attribute (berbagai nama)
     local ok, wm = pcall(function()
-        return workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
+        return _readMapId()
     end)
     if ok and type(wm) == "number" and wm > 50000 and wm ~= 50001 and wm ~= 50002 then
         return true
