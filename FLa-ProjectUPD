@@ -6802,7 +6802,6 @@ task.spawn(function()
  if not channels then return end
 
  local function watchChannel(ch)
- if true then return end -- KODE PELUMPUH
  if not ch:IsA("TextChannel") then return end
  ch.ChildAdded:Connect(function(obj)
  if obj:IsA("TextChatMessage") then
@@ -6857,7 +6856,6 @@ task.spawn(function()
  if not ec then return end
 
  local function checkBodyText(lbl)
- if true then return end -- KODE PELUMPUH
  pcall(function()
  if not lbl:IsA("TextLabel") or lbl.Name ~= "BodyText" then return end
  local function read()
@@ -7395,7 +7393,6 @@ end
 
 -- Pasang watcher ke satu slot (RE1001 atau RE1002)
 local function _watchRaidSlot(reFolder)
- if true then return end -- KODE PELUMPUH
  if not reFolder then return end
  for _, child in ipairs(reFolder:GetChildren()) do
  _onRaidChildAdded(child, reFolder.Name)
