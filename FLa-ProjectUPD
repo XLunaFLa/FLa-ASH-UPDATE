@@ -7242,21 +7242,20 @@ ParseRaidEntry = function(k, info)
  -- Gunakan raidId > 0 sebagai penjaga: entry ini adalah raid NORMAL, jangan warisi isAscension
  local _prevAsc = false
  local _prevBossName = nil
- -- Cek Ascension cache dari chat parser (key negatif di RAID_LIVE atau _runeGradeCache)
- -- Berlaku untuk semua mapNum 1-20, termasuk Map 20
- -- Prioritas: entry chat negatif yang sudah ada di RAID_LIVE > cache grade negatif
- local _ascCacheKey = -(mapId) -- key negatif = entry chat Ascension
+ -- Satu-satunya sumber kebenaran isAscension = entry negatif YANG MASIH ADA di RAID_LIVE.
+ -- Chat parser membuat RAID_LIVE[-(mapId)] saat notif Ascension Tower masuk.
+ -- Saat server kirim raidId asli, ParseRaidEntry replace entry temp itu dengan raidId positif.
+ -- JANGAN pakai _runeGradeCache negatif: cache itu persisten lintas batch,
+ -- akan salah mark RAID Normal sebagai Ascension di batch berikutnya.
+ local _ascCacheKey = -(mapId)
  if RAID_LIVE[_ascCacheKey] and RAID_LIVE[_ascCacheKey].isAscension then
   _prevAsc = true
   _prevBossName = RAID_LIVE[_ascCacheKey].bossName
-  RAID_LIVE[_ascCacheKey] = nil -- hapus entry temp chat, ganti dengan raidId asli server
- elseif _runeGradeCache and _runeGradeCache[-mapNum] then
-  -- Ada grade cache negatif = pernah terdeteksi sebagai Ascension dari chat notif
-  _prevAsc = true
+  RAID_LIVE[_ascCacheKey] = nil -- hapus entry temp, ganti dengan raidId asli server
  end
- -- CATATAN: tidak ada paksa _prevAsc=false untuk raidId positif.
- -- Server kirim raidId positif untuk SEMUA raid (normal maupun Ascension).
- -- Yang menentukan apakah Ascension adalah flag dari chat parser, bukan sign raidId.
+ -- raidId positif dari server = RAID Normal, KECUALI entry temp Ascension di atas terpenuhi.
+ -- RAID Normal dan Ascension pakai mapId yang SAMA (50001-50020).
+ -- Pembeda satu-satunya adalah flag isAscension dari chat parser via entry negatif.
  RAID_LIVE[raidId] = {
  raidId = raidId,
  mapId = mapId,
@@ -7343,25 +7342,40 @@ local function _onRaidChildAdded(child, slotName)
  end
  -- Buat entry sementara (tempKey negatif agar tidak bentrok raidId server)
  local tempKey = -(mapId)
+ -- [FIX] Preserve isAscension & bossName jika chat parser sudah buat entry Ascension di key ini
+ -- Chat notif bisa datang SEBELUM workspace event, jangan timpa flag isAscension-nya
+ local _prevIsAsc = false
+ local _prevBossName = nil
+ local _prevGrade = "?"
+ if RAID_LIVE[tempKey] and RAID_LIVE[tempKey].isAscension then
+  _prevIsAsc = true
+  _prevBossName = RAID_LIVE[tempKey].bossName
+  _prevGrade = RAID_LIVE[tempKey].grade or "?"
+ end
+ local _mn = mapNum
  RAID_LIVE[tempKey] = {
- raidId = tempKey,
- mapId = mapId,
- spawnName = slotName or "RE1001",
- rank = 0,
- grade = "?",
- endTime = nil,
- _tempEntry = true,
- label = "Map "..mapNum.." - "..(MAP_NAMES[mapNum] or "Map "..mapNum).." [?]",
+  raidId = tempKey,
+  mapId = mapId,
+  spawnName = slotName or "RE1001",
+  rank = 0,
+  grade = _prevGrade,
+  endTime = nil,
+  _tempEntry = true,
+  isAscension = _prevIsAsc,
+  bossName = _prevBossName,
+  label = _prevIsAsc
+   and ("Ascension Tower ".._mn..(_prevBossName and (" - "..(_prevBossName:gsub("^%l",string.upper))) or "").." [".._prevGrade.."]")
+   or ("Map ".._mn.." - "..(MAP_NAMES[_mn] or "Map ".._mn).." [?]"),
  }
  RebuildRaidList()
  if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
+ if _prevIsAsc and _ascWakeup then pcall(function() _ascWakeup:Fire() end) end
  -- [v271] Trigger webhook LANGSUNG saat raid muncul di workspace
- -- Tidak tunggu chat/TipsPanel - workspace adalah sumber tercepat
  if not _whSilent then
- task.spawn(function()
- task.wait(0.5) -- beri waktu RebuildRaidList selesai
- TriggerWebhookDebounce()
- end)
+  task.spawn(function()
+   task.wait(0.5)
+   TriggerWebhookDebounce()
+  end)
  end
 end
 
@@ -7497,16 +7511,18 @@ ConnectRaidListeners = function()
  -- [v271] Grade dari RAID_CONFIG_GRADE (formula matematika, cover semua seri)
  local grade = (RAID_CONFIG_GRADE and RAID_CONFIG_GRADE[raidId]) or (_runeGradeCache and _runeGradeCache[mapNum]) or "?"
  local tempKey = -(mapId) -- key entry chat Ascension (negatif)
- -- [FIX Ascension] Detect apakah entry ini Ascension dari chat cache atau RAID_LIVE
+ -- Detect isAscension: HANYA dari entry negatif yang masih hidup di RAID_LIVE (bukan runeGradeCache).
+ -- runeGradeCache negatif bersifat persisten lintas batch -> tidak aman sebagai sinyal isAscension.
  local _isAsc = false
  local _bnAsc = nil
  if RAID_LIVE[tempKey] and RAID_LIVE[tempKey].isAscension then
+  -- Entry temp Ascension dari chat parser masih ada -> ini adalah Ascension Tower
   _isAsc = true; _bnAsc = RAID_LIVE[tempKey].bossName
  elseif RAID_LIVE[raidId] and RAID_LIVE[raidId].isAscension then
+  -- Entry sudah ada sebelumnya dan sudah di-mark Ascension -> preserve
   _isAsc = true; _bnAsc = RAID_LIVE[raidId].bossName
- elseif _runeGradeCache and _runeGradeCache[-mapNum] then
-  _isAsc = true -- pernah masuk dari chat sebagai Ascension
  end
+ -- Build label
  local _lbl = _isAsc
   and ("Ascension Tower "..mapNum..(_bnAsc and (" - "..(_bnAsc:gsub("^%l",string.upper))) or "").." ["..grade.."]")
   or ("Map "..mapNum.." - "..(MAP_NAMES[mapNum] or "Map "..mapNum).." ["..grade.."](ID:"..raidId..")")
@@ -7516,31 +7532,27 @@ ConnectRaidListeners = function()
  spawnName = spawnName,
  rank = rank,
  grade = grade,
- isAscension = _isAsc, -- [FIX] selalu bawa flag isAscension
+ isAscension = _isAsc,
  bossName = _bnAsc,
  endTime = info.endTime,
  label = _lbl,
  }
- -- Kalau ada entry temp dari chat (negatif), replace dengan raidId asli dari server
- -- Sekaligus tulis langsung entryData (sudah mengandung isAscension yang benar)
+ -- Kalau ada entry temp Ascension dari chat (negatif), replace dengan raidId asli server
  if RAID_LIVE[tempKey] then
-  -- Entry Ascension dari chat: hapus temp, simpan dengan raidId asli server
   RAID_LIVE[raidId] = entryData
   RAID_LIVE[tempKey] = nil
  elseif not RAID_LIVE[raidId] then
-  -- Entry baru dari server: tulis langsung entryData (sudah detect isAscension via cache)
-  RAID_LIVE[raidId] = entryData
+  -- Entry baru dari server: ParseRaidEntry handle ini (sudah fix, hanya cek tempKey)
+  ParseRaidEntry(k, info)
  else
   -- Sudah ada entry: update grade/rank/label, preserve isAscension yang sudah true
   RAID_LIVE[raidId].grade = grade
   RAID_LIVE[raidId].rank = rank
   RAID_LIVE[raidId].label = _lbl
-  -- Jika sekarang terdeteksi Ascension (dari chat cache), set flag
   if _isAsc then
    RAID_LIVE[raidId].isAscension = true
    if _bnAsc then RAID_LIVE[raidId].bossName = _bnAsc end
   end
-  -- isAscension yang sudah true sebelumnya tidak pernah di-reset ke false di sini
  end
  until true
  end
@@ -7616,12 +7628,9 @@ function StopRaid()
  _defaultRRIdx = 0 -- reset RR saat RAID habis
  RAID_ID_LIST = {}
  if _runeGradeCache then
-  -- [FIX] Hanya hapus key positif (cache RAID normal).
-  -- Key negatif = cache grade Ascension Tower dari chat parser, milik Ascension Mode.
-  -- Jangan dihapus saat StopRaid, supaya Ascension Mode masih bisa detect isAscension.
-  for k in pairs(_runeGradeCache) do
-   if k > 0 then _runeGradeCache[k] = nil end
-  end
+  -- Reset semua cache grade saat sesi RAID baru dimulai (StopRaid dipanggil sebelum StartRaid)
+  -- Ini memastikan batch notif lama tidak mencemari sesi baru
+  for k in pairs(_runeGradeCache) do _runeGradeCache[k] = nil end
  end
  if RebuildRaidList then pcall(RebuildRaidList) end
  -- [FIX] JANGAN reset setting user (difficulty/rune/grades/preferMaps) di sini!
@@ -8324,16 +8333,19 @@ local function ResolveEntry()
                 -- [v46] Auto Raid selalu filter Normal saja (Ascension ditangani Auto Ascension)
                 local function _ascFilter(entry)
                     if not entry then return false end
-                    -- Entry dengan id negatif = pasti Ascension -> skip
-                    if entry.id and entry.id < 0 then return false end
-                    -- Cek flag isAscension dari entry atau RAID_LIVE
-                    local isAsc = entry.isAscension == true
-                    if not isAsc then
-                        local live = entry.id and RAID_LIVE[entry.id]
-                        if live then isAsc = live.isAscension == true end
+                    -- Cek flag isAscension dari entry RAID_ID_LIST itu sendiri
+                    if entry.isAscension == true then return false end
+                    -- Cek dari RAID_LIVE via id entry
+                    local live = entry.id and RAID_LIVE[entry.id]
+                    if live and live.isAscension == true then return false end
+                    -- Safety net: cek RAID_LIVE[-(mapId)] - entry chat Ascension yang belum di-resolve
+                    if entry.mapId then
+                        local chatKey = -(entry.mapId)
+                        local chatEnt = RAID_LIVE[chatKey]
+                        if chatEnt and chatEnt.isAscension == true then return false end
                     end
-                    -- Auto Raid: hanya entry Normal (bukan Ascension)
-                    return not isAsc
+                    -- Lolos semua cek = RAID Normal
+                    return true
                 end
                 local _now0 = os.time()
                 local _pruned0 = false
