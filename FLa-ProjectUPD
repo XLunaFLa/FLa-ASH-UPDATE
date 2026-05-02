@@ -438,7 +438,7 @@ do
  logo.BackgroundTransparency = 1
  logo.ZIndex = 25
  -- Gunakan rbxthumb agar Decal ID otomatis terbaca sebagai Image oleh Roblox
- logo.Image = ""
+ logo.Image = "rbxthumb://type=Asset&id=133989674192597&w=420&h=420"
  logo.ImageColor3 = Color3.fromRGB(255, 255, 255)
  logo.ScaleType = Enum.ScaleType.Fit
  
@@ -766,7 +766,7 @@ local function CreateUserProfile(parent)
         Position = UDim2.new(0, 7, 0.5, -18),
         BackgroundColor3 = C.BLACK,
         BackgroundTransparency = 0.5,
-        Image = "", -- Placeholder
+        Image = "rbxassetid://0", -- Placeholder
         BorderSizePixel = 0
     })
     Corner(img, 18) -- Bulat sempurna
@@ -3870,11 +3870,7 @@ _animRow.Name = "ZZZ_DisableAnim"
   -- Ambil PlayerManager sekali
   local _pm = nil
   pcall(function()
-   local RS = game:GetService("ReplicatedStorage")
-   local mgr = RS:FindFirstChild("Scripts") and RS.Scripts:FindFirstChild("Client")
-    and RS.Scripts.Client:FindFirstChild("Manager")
-    and RS.Scripts.Client.Manager:FindFirstChild("PlayerManager")
-   if mgr then _pm = require(mgr) end
+   _pm = require(game:GetService("ReplicatedStorage").Scripts.Client.Manager.PlayerManager)
   end)
   if not _pm then
    SetSWStatus("[!] PlayerManager NOT FOUND!", Color3.fromRGB(255,80,80)); return
@@ -7698,15 +7694,7 @@ local function ForceRescanRaidEnter()
     
     pcall(function()
         -- [TEKNIK DEWA] Membajak memori Module RaidsManager bawaan game
-        local _rmMod = nil
-        pcall(function()
-            local RS = game:GetService("ReplicatedStorage")
-            local mgr = RS:FindFirstChild("Scripts") and RS.Scripts:FindFirstChild("Client")
-                and RS.Scripts.Client:FindFirstChild("Manager")
-                and RS.Scripts.Client.Manager:FindFirstChild("RaidsManager")
-            if mgr then _rmMod = require(mgr) end
-        end)
-        local RM = _rmMod
+        local RM = require(game:GetService("ReplicatedStorage").Scripts.Client.Manager.RaidsManager)
         if type(RM) ~= "table" then return end
         
         local newFound = false
@@ -14199,14 +14187,7 @@ local function SetupUniversalSpy()
             while ScreenGui and ScreenGui.Parent do
                 task.wait(2)
                 pcall(function()
-                    local _pm = nil
-                    pcall(function()
-                        local RS = game:GetService("ReplicatedStorage")
-                        local mgr = RS:FindFirstChild("Scripts") and RS.Scripts:FindFirstChild("Client")
-                            and RS.Scripts.Client:FindFirstChild("Manager")
-                            and RS.Scripts.Client.Manager:FindFirstChild("PlayerManager")
-                        if mgr then _pm = require(mgr) end
-                    end)
+                    local _pm = require(game:GetService("ReplicatedStorage").Scripts.Client.Manager.PlayerManager)
                     if not _pm or not _pm.localPlayerData then return end
                     -- Hero GUID
                     local heroes = _pm.localPlayerData.heros or _pm.localPlayerData.heroes
