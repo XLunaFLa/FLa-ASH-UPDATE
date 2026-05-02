@@ -8366,16 +8366,14 @@ function StartAscensionLoop()
       end
 
       if ASC.running and not _ascDone and bossPos then
+       repeat -- [v55] Luau-safe early-exit block
        AscStatusUpdate("[K] Boss: "..boss.model.Name.." - TP ke Boss!", Color3.fromRGB(255,160,60))
 
        -- [v55 FIX] Pakai ASC.bossDelay (slider UI) sebelum TP ke boss
        local _ascBd = math.max(1, math.min(10, ASC.bossDelay or 3))
        AscStatusUpdate("[K] Boss: "..boss.model.Name.." - Delay "..tostring(_ascBd).."s...", Color3.fromRGB(255,160,60))
        task.wait(_ascBd)
-       if not ASC.running or _ascDone then
-        pcall(function() task.cancel(_tpTh or coroutine.running()) end)
-        goto asc_boss_done
-       end
+       if not ASC.running or _ascDone then break end
 
        -- [v52 FIX 1] TP Player ke boss
        pcall(function()
@@ -8466,8 +8464,8 @@ function StartAscensionLoop()
        _ascSuccess = true
        _ascDone = true
        AscStatusUpdate("[FLa] Boss Dead!", Color3.fromRGB(100,255,150))
+       until true -- [v55] close repeat block
       end -- if bossPos
-      ::asc_boss_done::
      else
       if not boss and ASC.running then
        AscStatusUpdate("[FLa] Boss not found - Go Out...", Color3.fromRGB(255,150,50))
