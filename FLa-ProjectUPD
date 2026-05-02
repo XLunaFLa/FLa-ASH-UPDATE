@@ -1188,6 +1188,7 @@ _raidOn = false
 ASC = {
  running  = false,
  inMap    = false,
+ _ascDone = false, -- [v57] flag: raid event sudah trigger (identik RAID._raidDone)
  thread   = nil,
  sukses   = 0,
  pickMode = "easy",   -- "easy" | "hard" | "default" | "byrank" | "bymap" | "manual"
@@ -7724,6 +7725,27 @@ task.spawn(function()
  end
 end)
 --  Helpers 
+-- ============================================================
+-- [v58] CanRaidEnter() - SATU SUMBER KEBENARAN apakah AUTO RAID NORMAL boleh masuk map
+-- Dipanggil di SEMUA titik check di RAID loop, tidak ada logika tersebar lagi.
+--
+-- RAID NORMAL diblok jika:
+--   1. ASC.running=true DAN masih ada entry Ascension Tower di RAID_LIVE
+--      (Tower belum expired / belum di-OFF) → ASC punya hak masuk duluan
+--   2. ASC.inMap=true → ASC sedang aktif di dalam Tower sekarang
+--
+-- RAID NORMAL BOLEH masuk jika:
+--   - ASC.running=false (fitur ASC dimatikan user), ATAU
+--   - ASC.running=true TAPI tidak ada Tower sama sekali di RAID_LIVE
+--     (semua expired / belum ada notifikasi baru)
+-- ============================================================
+local function CanRaidEnter()
+ if not (ASC and ASC.running) then return true end
+ if ASC.inMap then return false end
+ if GetAscensionList and #GetAscensionList() > 0 then return false end
+ return true
+end
+
 function StopRaid()
  _raidInterrupt = false
  MODE:ForceRelease("raid") -- [v50] stop paksa saat StopRaid dipanggil
@@ -7787,6 +7809,7 @@ end
 function StopAscension()
  ASC.running = false
  ASC.inMap   = false
+ ASC._ascDone = false
  if ASC.thread then
   pcall(function() task.cancel(ASC.thread) end)
   ASC.thread = nil
@@ -8086,16 +8109,13 @@ function StartAscensionLoop()
     -- [v48] Resolve entry berdasarkan Pick Mode
     local raidEntry = ResolveAscEntry()
 
-    -- [v53 FIX] Waiting loop jika tidak ada Ascension Tower tersedia
-    -- KRITIS: Release MODE lock saat menunggu agar RAID bisa fallback masuk!
-    -- Saat Tower muncul (wakeup), ASC akan request lock lagi dengan prioritas lebih tinggi.
+    -- [v58] Waiting loop jika tidak ada Tower tersedia
+    -- ASC lepas lock MODE agar tidak blockade, tapi TIDAK fire _raidWakeup
+    -- karena CanRaidEnter() di RAID loop sudah menangani kondisi ini secara mandiri.
     if ASC.running and not raidEntry then
-     -- Lepas lock MODE saat tidak ada Tower - beri jalan ke RAID untuk fallback
      if MODE:IsHeld("asc") then
       MODE:Release("asc")
      end
-     -- Wakeup RAID agar langsung tahu ada slot kosong
-     if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
     end
     while ASC.running and not raidEntry do
      -- [v53 FIX] Jika Siege interrupt masuk, ASC harus ngalah (Siege prioritas lebih tinggi)
@@ -8115,7 +8135,7 @@ function StartAscensionLoop()
      local _pm = ASC.pickMode or "easy"
      if #ascList == 0 then
       if RAID.running then
-       AscStatusUpdate("[Standby] Fallback ke RAID - tunggu Ascension Tower...", Color3.fromRGB(140,100,200))
+       AscStatusUpdate("Waiting Ascension Tower [".._pm.."]...", Color3.fromRGB(140,140,60))
       else
        AscStatusUpdate("Waiting Ascension Tower [".._pm.."]...", Color3.fromRGB(140,140,60))
       end
@@ -8262,11 +8282,12 @@ function StartAscensionLoop()
     end
 
     -- ================================================================
-    -- [v52 FIX] FLOW BARU: Masuk → Delay 2s → Cari Boss → TP ke Boss
-    --                      → Serang sampai mati → Claim Reward → TP keluar
+    -- [v57] FLOW ASC: Masuk → Equip Hero → Loading 8s (early boss detect)
+    --                → AUTO BOSS KILL (ekosistem identik AUTO RAID)
+    --                → Claim Reward → TP keluar
     -- ================================================================
 
-    -- STEP 4: Equip hero dulu (background, tidak blocking)
+    -- STEP 4: Equip hero (background, tidak blocking) - sama persis AUTO RAID
     if #HERO_GUIDS > 0 then
      task.spawn(function()
       task.wait(0.3)
@@ -8276,28 +8297,86 @@ function StartAscensionLoop()
         task.wait(0.1)
        end
       end
+      -- HeroStandTo ke posisi player sekarang (sama persis AUTO RAID)
+      if RE.HeroStand then
+       local char = LP.Character
+       local hrp = char and char:FindFirstChild("HumanoidRootPart")
+       local spawnPos = (hrp and hrp.Position) or Vector3.new(0,0,0)
+       pcall(function()
+        RE.HeroStand:FireServer({ userId = MY_USER_ID, standPos = spawnPos })
+       end)
+       for _, hGuid in ipairs(HERO_GUIDS) do
+        pcall(function()
+         RE.HeroStand:FireServer({ heroGuid=hGuid, userId=MY_USER_ID, standPos=spawnPos })
+        end)
+       end
+      end
      end)
     end
 
-    -- [v52 FIX 1] Delay 2 detik setelah masuk map (stabilize + boss spawn)
-    AscStatusUpdate("[~] Dalam Tower "..mn.." - stabilize 2s...", Color3.fromRGB(100,200,255))
-    task.wait(2)
-    if not ASC.running then ASC.inMap = false; break end
-
-    -- [v56 BUG FIX 1] Flush diperpanjang dari 0.2s → 0.5s
-    -- 0.2s (2 frame @30fps) tidak cukup buang pending event dari RAID sebelumnya
-    -- _cfConn sudah disconnect di atas, tidak ada risiko double-trigger lagi
-    local _ascDone = false
+    -- [v57] STEP 4b: Listener event + loading wait 8s + early boss detect
+    -- Identik dengan AUTO RAID - dipasang SEBELUM loading agar tidak ada event terlewat
+    ASC._ascDone = false
     local _ascSuccess = false
     local connAS, connAF
-    task.wait(0.5) -- flush 5+ frame: buang semua pending event sebelum listen
+    -- [v56 BUG FIX 1] Flush 0.5s buang semua pending event dari sesi sebelumnya
+    task.wait(0.5)
     local _reAS2 = Remotes:FindFirstChild("ChallengeRaidsSuccess")
     local _reAF2 = Remotes:FindFirstChild("ChallengeRaidsFail")
-    if _reAS2 then connAS = _reAS2.OnClientEvent:Connect(function() _ascDone = true; _ascSuccess = true end) end
-    if _reAF2 then connAF = _reAF2.OnClientEvent:Connect(function() _ascDone = true end) end
+    if _reAS2 then connAS = _reAS2.OnClientEvent:Connect(function() ASC._ascDone = true; _ascSuccess = true end) end
+    if _reAF2 then connAF = _reAF2.OnClientEvent:Connect(function() ASC._ascDone = true end) end
 
-    if ASC.autoKillBoss then
-     -- BOSS_KEYS untuk Ascension Tower
+    -- [v57] Loading wait + early boss detect (identik AUTO RAID, 8s, tiap 0.5s)
+    AscStatusUpdate("[..] Enter Tower - loading...", Color3.fromRGB(160,148,135))
+    local _loadWait = 0
+    local _earlyBoss = nil
+
+    -- BOSS_KEYS untuk Ascension Tower (sama dengan AUTO RAID)
+    local BOSS_KEYS_EARLY_ASC = {
+     "goblin king","giant arachnid","buryura","igris",
+     "leader of the polar","arch lich","kargalgan","baran",
+     "beru","grendal","monarch plague","frostborne","legia",
+     "monarch beastly","beastly fangs","silas","unbreakable monarch",
+     "yogumunt","monarch of transfiguration","transfiguration",
+     "antares","ashborn","dominion","absolute","monarch","fragment","boss",
+     "legendary super saiyan","broly",
+     "goku[super4]","goku super4","goku super 4",
+    }
+    local function IsBossEarlyAsc(name)
+     local n = name:lower()
+     for _, k in ipairs(BOSS_KEYS_EARLY_ASC) do if n:find(k,1,true) then return true end end
+     return false
+    end
+    -- Ambil hint bossName dari raidEntry (dari chat parser) untuk early detect lebih presisi
+    local _earlyAscHint = raidEntry.bossName or nil
+    local function IsBossEarlyAscWithHint(name)
+     local n = name:lower()
+     if _earlyAscHint and n:find(_earlyAscHint:lower(),1,true) then return true end
+     return IsBossEarlyAsc(name)
+    end
+
+    while _loadWait < 8 and ASC.running and not ASC._ascDone do
+     task.wait(0.5); _loadWait = _loadWait + 0.5
+     -- Mulai cari boss sejak detik ke-1
+     if _loadWait >= 1 and not _earlyBoss then
+      for _, e in ipairs(GetRaidEnemies()) do
+       if IsBossEarlyAscWithHint(e.model.Name) then _earlyBoss = e; break end
+      end
+     end
+     -- Validasi posisi boss (identik AUTO RAID)
+     if _earlyBoss then
+      local _ep = _earlyBoss.hrp and _earlyBoss.hrp.Parent and _earlyBoss.hrp.Position
+      if _ep and _ep.Y > -200 and _ep.Magnitude > 1 and _loadWait >= 1.5 then
+       break
+      end
+      if _ep and (_ep.Y <= -200 or _ep.Magnitude <= 1) then
+       _earlyBoss = nil
+      end
+     end
+    end
+
+    if ASC.running and not ASC._ascDone and ASC.autoKillBoss then
+     -- [v57] AUTO BOSS KILL - ekosistem identik AUTO RAID, diadaptasi untuk ASC
      local BOSS_KEYS_ASC = {
       "goblin king","giant arachnid","buryura","igris",
       "leader of the polar","arch lich","kargalgan","baran",
@@ -8308,86 +8387,127 @@ function StartAscensionLoop()
       "legendary super saiyan","broly",
       "goku[super4]","goku super4","goku super 4",
      }
-     local _ascHintName = raidEntry.bossName and raidEntry.bossName:lower() or nil
-     local function IsBossAscWithHint(name)
+     local function IsBossAsc(name)
       local n = name:lower()
-      if _ascHintName and n:find(_ascHintName,1,true) then return true end
       for _, k in ipairs(BOSS_KEYS_ASC) do if n:find(k,1,true) then return true end end
       return false
      end
+     local _ascHintName = raidEntry.bossName or nil
+     local function IsBossAscWithHint(name)
+      local n = name:lower()
+      if _ascHintName and n:find(_ascHintName:lower(),1,true) then return true end
+      return IsBossAsc(name)
+     end
 
-     -- [v52 FIX 1] Cari boss langsung setelah delay 2s (bukan 8s loading + 30s scan)
-     -- Scan cepat dulu, lalu fallback scan workspace descendants jika belum ketemu
-     local boss = nil
-     AscStatusUpdate("[?] Find Boss...", Color3.fromRGB(160,148,135))
+     -- Pakai boss dari early detection kalau sudah ada DAN valid
+     local boss = (_earlyBoss and IsBossAscWithHint(_earlyBoss.model.Name)) and _earlyBoss or nil
+     if not boss and _earlyBoss and _ascHintName then
+      local n = _earlyBoss.model.Name:lower()
+      if n:find(_ascHintName:lower(),1,true) then boss = _earlyBoss end
+     end
 
-     -- Scan pertama dari GetRaidEnemies (max 10s)
-     local _findWait = 0
-     while ASC.running and not boss and _findWait < 10 and not _ascDone do
+     -- [v57] ChildAdded listener - identik AUTO RAID, range Tower 50301-50326
+     local waitBoss = 0
+     local _bossFoundViaEvent = false
+     local _bossEventConns = {}
+     local function _tryAddBossFromObjAsc(obj)
+      if boss or not obj:IsA("Model") then return end
+      if IsBossAscWithHint(obj.Name) then
+       local g = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid") or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
+       local hrp = obj:FindFirstChild("HumanoidRootPart")
+       local hum = obj:FindFirstChildOfClass("Humanoid")
+       if g and hrp and hum and hum.Health > 0 then
+        boss = {guid=g, hrp=hrp, model=obj}
+        _bossFoundViaEvent = true
+       end
+      end
+     end
+     for _, fname in ipairs({"Bosses","Boss","RaidBoss","Enemys","Enemy","Enemies","RaidEnemys","Monsters"}) do
+      local folder = workspace:FindFirstChild(fname)
+      if folder then
+       table.insert(_bossEventConns, folder.ChildAdded:Connect(_tryAddBossFromObjAsc))
+      end
+     end
+     table.insert(_bossEventConns, workspace.ChildAdded:Connect(function(obj)
+      if obj:IsA("Folder") or obj:IsA("Model") then
+       _tryAddBossFromObjAsc(obj)
+       pcall(function()
+        table.insert(_bossEventConns, obj.ChildAdded:Connect(_tryAddBossFromObjAsc))
+        for _, child in ipairs(obj:GetChildren()) do _tryAddBossFromObjAsc(child) end
+       end)
+      end
+     end))
+
+     -- [v57] Scan GetRaidEnemies timeout 30s (identik AUTO RAID)
+     while ASC.running and not boss and waitBoss < 30 and not ASC._ascDone do
       for _, e in ipairs(GetRaidEnemies()) do
        if IsBossAscWithHint(e.model.Name) then boss = e; break end
       end
       if not boss then
-       AscStatusUpdate("Find Boss... ("..math.floor(_findWait).."s/10s)", Color3.fromRGB(160,148,135))
-       task.wait(0.3); _findWait = _findWait + 0.3
+       AscStatusUpdate("Find Boss... ("..math.floor(waitBoss).."s/30s)", Color3.fromRGB(160,148,135))
+       task.wait(0.3); waitBoss = waitBoss + 0.3
       end
      end
 
-     -- Fallback: scan workspace:GetDescendants() jika belum ketemu
-     if not boss and ASC.running and not _ascDone then
-      pcall(function()
-       for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("Model") and IsBossAscWithHint(obj.Name) then
-         local g = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid") or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
-         local hrp = obj:FindFirstChild("HumanoidRootPart")
-         local hum = obj:FindFirstChildOfClass("Humanoid")
-         if g and hrp and hum and hum.Health > 0 then
-          boss = {guid=g, hrp=hrp, model=obj}; break
-         end
-        end
-       end
-      end)
-     end
+     -- Lepaskan semua event listener boss
+     for _, c in ipairs(_bossEventConns) do pcall(function() c:Disconnect() end) end
+     _bossEventConns = {}
 
-     -- Helper bossPos yang aman
-     local function GetSafeAscBossPos()
-      if boss and boss.hrp and boss.hrp.Parent then
-       local p = boss.hrp.Position
-       if p.Y > -200 then return p end
-      end
-      return nil
-     end
-
-     if boss and ASC.running and not _ascDone then
+     if boss and ASC.running and not ASC._ascDone then
       local bossGuid = boss.guid
-      local bossPos = GetSafeAscBossPos()
-      -- Tunggu posisi boss valid max 3s
-      local _wpWait = 0
-      while not bossPos and _wpWait < 3 and ASC.running and not _ascDone do
-       task.wait(0.3); _wpWait = _wpWait + 0.3
-       bossPos = GetSafeAscBossPos()
+      -- [v57] GetSafeBossPos - validasi Y identik AUTO RAID
+      local function GetSafeBossPos()
+       if boss.hrp and boss.hrp.Parent then
+        local p = boss.hrp.Position
+        if p.Y > -200 then return p end
+       end
+       return nil
+      end
+      local bossPos = GetSafeBossPos()
+      if not bossPos then
+       local _waitPos = 0
+       while not bossPos and _waitPos < 3 and ASC.running and not ASC._ascDone do
+        task.wait(0.3); _waitPos = _waitPos + 0.3
+        bossPos = GetSafeBossPos()
+       end
+      end
+      if not bossPos then
+       AscStatusUpdate("[!] Boss pos tidak valid - skip TP boss", Color3.fromRGB(255,80,80))
+      end
+      -- [v57] Boss delay countdown - pakai ASC.bossDelay (identik RAID.bossDelay)
+      local _bd = math.max(1, math.min(10, ASC.bossDelay or 3))
+      for _ci = _bd, 1, -1 do
+       if not ASC.running or ASC._ascDone then break end
+       AscStatusUpdate("[K] Boss: "..boss.model.Name.." - TP ".._ci.."s...", Color3.fromRGB(255,160,60))
+       task.wait(1)
+      end
+      -- [v57] Refresh bossPos SETELAH countdown (identik AUTO RAID)
+      local _refreshWait = 0
+      bossPos = GetSafeBossPos()
+      while not bossPos and _refreshWait < 3 and ASC.running and not ASC._ascDone do
+       task.wait(0.3); _refreshWait = _refreshWait + 0.3
+       bossPos = GetSafeBossPos()
+      end
+      if bossPos and bossPos.Y < -100 then
+       AscStatusUpdate("[!] Posisi boss terlalu rendah - tunggu stabilisasi...", Color3.fromRGB(255,160,60))
+       task.wait(1)
+       bossPos = GetSafeBossPos()
       end
 
-      if ASC.running and not _ascDone and bossPos then
-       repeat -- [v55] Luau-safe early-exit block
-       AscStatusUpdate("[K] Boss: "..boss.model.Name.." - TP ke Boss!", Color3.fromRGB(255,160,60))
+      if ASC.running and not ASC._ascDone and bossPos then
+       AscStatusUpdate("[K] Boss: "..boss.model.Name.." - Attack!", Color3.fromRGB(255,80,80))
 
-       -- [v55 FIX] Pakai ASC.bossDelay (slider UI) sebelum TP ke boss
-       local _ascBd = math.max(1, math.min(10, ASC.bossDelay or 3))
-       AscStatusUpdate("[K] Boss: "..boss.model.Name.." - Delay "..tostring(_ascBd).."s...", Color3.fromRGB(255,160,60))
-       task.wait(_ascBd)
-       if not ASC.running or _ascDone then break end
-
-       -- [v52 FIX 1] TP Player ke boss
+       -- [v57] 1) TP Player ke boss (identik AUTO RAID)
        pcall(function()
         local char = LP.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        local safePos = GetSafeAscBossPos()
+        local safePos = GetSafeBossPos()
         if hrp and safePos then hrp.CFrame = CFrame.new(safePos + Vector3.new(3,0,0)) end
        end)
-       -- TP semua hero ke boss
+
+       -- [v57] 2) TP semua hero client-side ke boss (identik AUTO RAID)
        pcall(function()
-        local safePos2 = GetSafeAscBossPos()
+        local safePos2 = GetSafeBossPos()
         if not safePos2 then return end
         local heroFolder = workspace:FindFirstChild("Heros")
         if heroFolder then
@@ -8397,33 +8517,54 @@ function StartAscensionLoop()
          end
         end
        end)
-       -- Fire hero remotes
+
+       -- [v57] 3) Fire semua hero remote ke boss (identik AUTO RAID)
        pcall(function()
-        local safePos3 = GetSafeAscBossPos()
+        local safePos3 = GetSafeBossPos()
         if safePos3 then FireHeroRemotes(bossGuid, safePos3) end
        end)
        if RE.HeroStand and #HERO_GUIDS > 0 then
-        local safePos3b = GetSafeAscBossPos()
+        local safePos3b = GetSafeBossPos()
         if safePos3b then
          for _, hGuid in ipairs(HERO_GUIDS) do
-          pcall(function() RE.HeroStand:FireServer({ heroGuid=hGuid, userId=MY_USER_ID, standPos=safePos3b+Vector3.new(1,0,1) }) end)
+          pcall(function()
+           RE.HeroStand:FireServer({ heroGuid=hGuid, userId=MY_USER_ID, standPos=safePos3b+Vector3.new(1,0,1) })
+          end)
          end
         end
        end
-       -- UnEquip -> EquipBest
+
+       -- [v57] 4) UnEquip -> EquipBest (identik AUTO RAID)
        task.wait(0.3)
        if RE.UnEquipHero then pcall(function() RE.UnEquipHero:FireServer() end) end
        task.wait(0.3)
        if RE.EquipBestHero then pcall(function() RE.EquipBestHero:FireServer() end) end
        task.wait(0.3)
 
-       -- Background thread: TP player+hero terus ke boss tiap 0.5s selama attack
+       -- [v57] 5) TP ulang semua hero setelah re-equip (identik AUTO RAID)
+       pcall(function()
+        local safePos5 = GetSafeBossPos()
+        if not safePos5 then return end
+        local heroFolder = workspace:FindFirstChild("Heros")
+        if heroFolder then
+         for _, hModel in ipairs(heroFolder:GetChildren()) do
+          local hHrp = hModel:FindFirstChild("HumanoidRootPart")
+          if hHrp then hHrp.CFrame = CFrame.new(safePos5 + Vector3.new(math.random(-2,2),0,math.random(-2,2))) end
+         end
+        end
+       end)
+       pcall(function()
+        local safePos5b = GetSafeBossPos()
+        if safePos5b then FireHeroRemotes(bossGuid, safePos5b) end
+       end)
+
+       -- [v57] 6) Background TP thread (identik AUTO RAID, range Tower 50301-50326)
        local _tpTh = task.spawn(function()
-        while ASC.running and not _ascDone do
-         local _tpMap = _readMapId() -- [GODMODE FIX v53] GetCurrentMapId belum defined di sini, pakai _readMapId
+        while ASC.running and not ASC._ascDone do
+         local _tpMap = _readMapId()
          if _tpMap and (_tpMap < 50301 or _tpMap > 50326) then break end
          pcall(function()
-          local pos = GetSafeAscBossPos()
+          local pos = GetSafeBossPos()
           if not pos then return end
           local char = LP.Character
           local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -8446,39 +8587,94 @@ function StartAscensionLoop()
         end
        end)
 
-       -- [v52 FIX 1] Serang boss sampai mati (0.08s per attack)
+       -- [v57] 7) Serang boss (identik AUTO RAID) + debounce keluar manual
        AscStatusUpdate("[FLa] Attack: "..boss.model.Name, Color3.fromRGB(255,80,80))
-       while ASC.running and not _ascDone do
-        local _curMap = _readMapId() -- [GODMODE FIX v53] GetCurrentMapId belum defined di sini, pakai _readMapId
+       local _outOfMapCount = 0
+       local _bossKilledAsc = false
+       while ASC.running and not ASC._ascDone do
+        local _curMap = _readMapId()
         if _curMap and (_curMap < 50301 or _curMap > 50326) then
-         AscStatusUpdate("[!] Player keluar Tower - stop attack", Color3.fromRGB(255,140,0))
-         break
+         _outOfMapCount = _outOfMapCount + 1
+         if _outOfMapCount >= 3 then
+          AscStatusUpdate("[!] Player keluar Tower manual - reset state", Color3.fromRGB(255,140,0))
+          _bossKilledAsc = false
+          break
+         end
+        else
+         _outOfMapCount = 0
         end
-        if not boss.model or not boss.model.Parent then break end
+        if not boss.model or not boss.model.Parent then
+         _bossKilledAsc = true; break
+        end
         local hum = boss.model:FindFirstChildOfClass("Humanoid")
-        if hum and hum.Health <= 0 then break end
-        local p = GetSafeAscBossPos()
+        if hum and hum.Health <= 0 then
+         _bossKilledAsc = true; break
+        end
+        local p = GetSafeBossPos()
         if not p then task.wait(0.08); continue end
         task.spawn(function() pcall(function() RaidFireDamage(bossGuid, p) end) end)
         task.wait(0.08)
        end
 
        pcall(function() task.cancel(_tpTh) end)
-       _ascSuccess = true
-       _ascDone = true
-       AscStatusUpdate("[FLa] Boss Dead!", Color3.fromRGB(100,255,150))
-       until true -- [v55] close repeat block
-      end -- if bossPos
+       -- [v57] Hanya sukses jika boss benar-benar mati (identik AUTO RAID _bossKilled logic)
+       if _bossKilledAsc then
+        _ascSuccess = true
+        ASC._ascDone = true
+        AscStatusUpdate("[FLa] Boss Dead!", Color3.fromRGB(100,255,150))
+       else
+        -- Keluar manual: reset state, cooldown, lanjut iterasi (identik AUTO RAID)
+        ASC._ascDone = true
+        _ascSuccess = false
+        if connAS then pcall(function() connAS:Disconnect() end) end
+        if connAF then pcall(function() connAF:Disconnect() end) end
+        ASC.inMap = false
+        MODE:Release("asc")
+        for cd = 14, 1, -1 do
+         if not ASC.running then break end
+         AscStatusUpdate("[..] Keluar Manual - Cooldown "..cd.."s...", Color3.fromRGB(255,140,0))
+         if ASC.dot then ASC.dot.BackgroundColor3 = Color3.fromRGB(255,200,60) end
+         task.wait(1)
+        end
+        if ASC.running then
+         AscStatusUpdate("[>>] Siap cari Tower baru...", Color3.fromRGB(100,255,150))
+         if ASC.dot then ASC.dot.BackgroundColor3 = Color3.fromRGB(100,100,100) end
+        end
+        break
+       end
+      end -- if ASC.running and bossPos
      else
-      if not boss and ASC.running then
-       AscStatusUpdate("[FLa] Boss not found - Go Out...", Color3.fromRGB(255,150,50))
-       task.wait(2)
+      -- [v57] Last chance scan workspace:GetDescendants() (identik AUTO RAID)
+      if not boss and ASC.running and not ASC._ascDone then
+       local _lastChance = nil
+       pcall(function()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+         if obj:IsA("Model") and IsBossAscWithHint(obj.Name) then
+          local g = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid") or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
+          local hrp = obj:FindFirstChild("HumanoidRootPart")
+          local hum = obj:FindFirstChildOfClass("Humanoid")
+          if g and hrp and hum and hum.Health > 0 then
+           _lastChance = {guid=g, hrp=hrp, model=obj}; break
+          end
+         end
+        end
+       end)
+       if _lastChance and ASC.running and not ASC._ascDone then
+        boss = _lastChance
+        AscStatusUpdate("[!] Boss found (last chance): "..boss.model.Name, Color3.fromRGB(255,200,50))
+       end
+       if not boss and ASC.running then
+        AscStatusUpdate("[FLa] Boss not found (30s) - Go Out...", Color3.fromRGB(255,150,50))
+        task.wait(3)
+       end
       end
-     end
-    else
+     end -- if boss
+
+    elseif ASC.running and not ASC._ascDone then
      -- Auto Kill Boss OFF - tunggu event ChallengeRaidsSuccess max 5 menit
+     -- sama persis AUTO RAID
      local _wt = 0
-     while ASC.running and not _ascDone and _wt < 300 do
+     while ASC.running and not ASC._ascDone and _wt < 300 do
       task.wait(1); _wt = _wt + 1
       local wm = _readMapId()
       if wm == 0 or (wm >= 50001 and wm <= 50028) then break end
@@ -8495,17 +8691,21 @@ function StartAscensionLoop()
     end
     if not ASC.running then break end
 
-    -- [v52 FIX 2] Claim reward chest ke server (GainRaidsRewards) + collect item
+    -- [v57] Claim reward (identik AUTO RAID wait 1s + GainRaidsRewards + collect)
+    if _ascSuccess then
+     AscStatusUpdate("[..] Wait 1s (Get reward)...", Color3.fromRGB(100,255,150))
+     task.wait(1)
+    end
+    if not ASC.running then break end
+
+    -- [v57] Collect item + GainRaidsRewards (identik AUTO RAID STEP 5)
+    task.spawn(function() pcall(RaidCollectAll) end)
     if _ascSuccess then
      AscStatusUpdate("[..] Claim Reward...", Color3.fromRGB(100,255,150))
      task.wait(0.5)
-     -- GainRaidsRewards: konfirmasi reward ke server (WAJIB, tanpa ini reward tidak masuk)
      if RE.GainRaidsRewards then
       pcall(function() RE.GainRaidsRewards:InvokeServer(1) end)
      end
-     task.wait(0.5)
-     -- Collect item yang jatuh di map
-     task.spawn(function() pcall(RaidCollectAll) end)
      task.wait(0.5)
     end
     if not ASC.running then break end
@@ -8590,11 +8790,10 @@ function StartAscensionLoop()
     if ASC.running then
      AscStatusUpdate("[>>] Cooldown selesai - Waiting Ascension Tower...", Color3.fromRGB(100,255,150))
      if ASC.dot then ASC.dot.BackgroundColor3 = Color3.fromRGB(100,100,100) end
-     -- [v53 FIX] Release lock saat standby menunggu Tower berikutnya
-     -- RAID bisa fallback masuk saat tidak ada Tower
+     -- [v58] Release lock saat standby - RAID akan cek CanRaidEnter() secara mandiri
+     -- Tidak perlu fire _raidWakeup karena RAID loop sudah polling CanRaidEnter() tiap 0.5s
      if MODE:IsHeld("asc") then
       MODE:Release("asc")
-      if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
      end
      local _fw = 0
      while ASC.running do
@@ -8618,11 +8817,7 @@ function StartAscensionLoop()
       if #GetAscensionList() > 0 then
        AscStatusUpdate("[FLa] Waiting grade filter... (".._fw.."s)", Color3.fromRGB(200,255,150))
       else
-       if RAID.running then
-        AscStatusUpdate("[Standby] Fallback ke RAID (".._fw.."s)", Color3.fromRGB(140,100,200))
-       else
-        AscStatusUpdate("[FLa] Waiting Ascension Tower... (".._fw.."s)", Color3.fromRGB(160,120,60))
-       end
+       AscStatusUpdate("[FLa] Waiting Ascension Tower... (".._fw.."s)", Color3.fromRGB(160,120,60))
       end
       -- Wakeup cepat
       local _woken2 = false
@@ -8976,18 +9171,11 @@ function StartRaidLoop()
     while _siegeInterrupt and RAID.running do task.wait(0.5) end
     if not RAID.running then break end
    end
-   -- [v56 BUG FIX 2] Jika ASC.running=true DAN ada Tower tersedia, RAID tidak boleh ambil alih.
-   -- ASC bisa saja sedang cooldown/standby (MODE sudah idle), tapi Tower masih menunggu.
-   -- RAID hanya boleh masuk jika ASC tidak running ATAU tidak ada Tower sama sekali.
-   if ASC and ASC.running then
-    local _ascHasTower = GetAscensionList and #GetAscensionList() > 0
-    if _ascHasTower then
-     RaidStatusUpdate("[||] ASC aktif & ada Tower - RAID menunggu ASC...", Color3.fromRGB(140,100,200))
-     while RAID.running and ASC.running and (GetAscensionList and #GetAscensionList() > 0) do
-      task.wait(0.5)
-     end
-     if not RAID.running then break end
-    end
+   -- [v58] Gunakan CanRaidEnter() - satu sumber kebenaran
+   if not CanRaidEnter() then
+    RaidStatusUpdate("[||] ASC aktif & ada Tower - RAID menunggu ASC...", Color3.fromRGB(140,100,200))
+    while RAID.running and not CanRaidEnter() do task.wait(0.5) end
+    if not RAID.running then break end
    end
    if MODE:Request("raid") then break end
    if MODE.current ~= "idle" then
@@ -9005,10 +9193,10 @@ function StartRaidLoop()
    RaidStatusUpdate("[||] Siege interrupt setelah dapat slot - lepas kembali...", Color3.fromRGB(255,140,0))
    break
   end
-  -- [v56 BUG FIX 2] Double-check: ASC butuh slot (Tower baru muncul setelah RAID dapat lock)
-  if ASC and ASC.running and GetAscensionList and #GetAscensionList() > 0 then
+  -- [v58] Double-check CanRaidEnter() setelah dapat lock
+  if not CanRaidEnter() then
    MODE:Release("raid")
-   RaidStatusUpdate("[||] ASC butuh slot (Tower muncul) - RAID lepas kembali...", Color3.fromRGB(140,100,200))
+   RaidStatusUpdate("[||] ASC butuh slot - RAID lepas kembali...", Color3.fromRGB(140,100,200))
    break
   end
   RaidStatusUpdate("> Giliran RAID! Siap masuk...", C.ACC3)
@@ -9265,15 +9453,11 @@ local function ResolveEntry()
   if not RAID.running then break end
  end
  -- [INDEPENDEN] tidak pause saat siege di waiting loop
- -- [v55 FIX] Priority gate: RAID Normal ngalah jika ASC ON dan sedang aktif (inMap/hold lock)
- -- Hanya block saat ASC benar-benar sedang MASUK tower, bukan saat menunggu
- if ASC and ASC.running and (ASC.inMap or MODE:IsHeld("asc")) then
-  RaidStatusUpdate("[||] Ascension Tower aktif - RAID Normal menunggu...", Color3.fromRGB(180,100,255))
+ -- [v58] Gunakan CanRaidEnter() - mencakup semua kondisi: inMap, cooldown, standby, ada Tower
+ if not CanRaidEnter() then
+  RaidStatusUpdate("[||] ASC aktif (Tower tersedia) - RAID Normal menunggu...", Color3.fromRGB(180,100,255))
   if MODE:IsHeld("raid") then MODE:Release("raid") end
-  while RAID.running do
-   -- Berhenti jika: ASC OFF, atau ASC tidak lagi di dalam tower dan tidak hold lock
-   if not ASC.running then break end
-   if not ASC.inMap and not MODE:IsHeld("asc") then break end
+  while RAID.running and not CanRaidEnter() do
    task.wait(0.5)
   end
   if not RAID.running then break end
