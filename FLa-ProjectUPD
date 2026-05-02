@@ -8142,16 +8142,18 @@ function StartAscensionLoop()
     task.wait(0.3)
     if not ASC.running then ASC.inMap = false; break end
 
-    -- STEP 2: StartChallengeRaidMap (TANPA argumen - confirmed SimpleSPY)
+    -- STEP 2: StartChallengeRaidMap dengan mapId Ascension Tower
+    -- [v52 FIX BUG 1] Harus kirim {mapId=targetMapId}, bukan tanpa argumen!
+    -- Tanpa mapId server tidak tahu map mana yang dituju -> player langsung di-kick keluar
     local _cfail = false
     local _cfConn
     local _cfRe = Remotes:FindFirstChild("ChallengeRaidsFail")
     if _cfRe then _cfConn = _cfRe.OnClientEvent:Connect(function() _cfail = true end) end
 
     if RE.StartChallengeRaidMap then
-     pcall(function() RE.StartChallengeRaidMap:FireServer() end)
+     pcall(function() RE.StartChallengeRaidMap:FireServer({mapId = targetMapId}) end)
     end
-    task.wait(0.3)
+    task.wait(0.5) -- [v52 FIX] Tambah jeda 0.5s (dari 0.3s) agar server proses mapId dulu
     if not ASC.running then
      if _cfConn then pcall(function() _cfConn:Disconnect() end) end
      ASC.inMap = false; break
@@ -8161,6 +8163,14 @@ function StartAscensionLoop()
     if RE.StartLocalPlayerTeleport then
      pcall(function() RE.StartLocalPlayerTeleport:FireServer({hostId=LP.UserId, mapId=targetMapId}) end)
     end
+    task.wait(0.3)
+
+    -- [v52 FIX BUG 2] LocalPlayerTeleportSuccess WAJIB dikirim setelah StartLocalPlayerTeleport
+    -- Tanpa ini server menganggap TP gagal dan langsung mengembalikan player ke posisi sebelumnya
+    if RE.LocalTpSuccess then
+     task.spawn(function() pcall(function() RE.LocalTpSuccess:InvokeServer() end) end)
+    end
+    task.wait(0.3)
 
     -- Tunggu masuk map Ascension Tower (range 50301-50326)
     local _tpOk = false
@@ -8172,6 +8182,12 @@ function StartAscensionLoop()
       if wm and wm >= 50301 and wm <= 50326 then _tpOk = true end
      end)
      if not _tpOk and #GetRaidEnemies() > 0 then _tpOk = true end
+     -- [v52 FIX] Jika belum masuk setelah 4 detik, retry kirim LocalTpSuccess
+     if not _tpOk and _tpW > 0 and math.floor(_tpW * 10) % 40 == 0 then
+      if RE.LocalTpSuccess then
+       task.spawn(function() pcall(function() RE.LocalTpSuccess:InvokeServer() end) end)
+      end
+     end
     end
     if _cfConn then pcall(function() _cfConn:Disconnect() end) end
 
@@ -8184,30 +8200,30 @@ function StartAscensionLoop()
      task.wait(2); break
     end
 
-    -- STEP 4: Dalam map - equip hero
+    -- ================================================================
+    -- [v52 FIX] FLOW BARU: Masuk → Delay 2s → Cari Boss → TP ke Boss
+    --                      → Serang sampai mati → Claim Reward → TP keluar
+    -- ================================================================
+
+    -- STEP 4: Equip hero dulu (background, tidak blocking)
     if #HERO_GUIDS > 0 then
      task.spawn(function()
-      task.wait(0.5)
+      task.wait(0.3)
       if RE.EquipHeroWithData then
        for _, hGuid in ipairs(HERO_GUIDS) do
-        pcall(function()
-         RE.EquipHeroWithData:FireServer({ heroGuid = hGuid, userId = MY_USER_ID })
-        end)
+        pcall(function() RE.EquipHeroWithData:FireServer({ heroGuid = hGuid, userId = MY_USER_ID }) end)
         task.wait(0.1)
        end
-      end
-      if RE.HeroStand then
-       local char = LP.Character
-       local hrp = char and char:FindFirstChild("HumanoidRootPart")
-       local spawnPos = (hrp and hrp.Position) or Vector3.new(0,0,0)
-       pcall(function() RE.HeroStand:FireServer({ userId=MY_USER_ID, standPos=spawnPos }) end)
       end
      end)
     end
 
-    AscStatusUpdate("[~] Dalam Tower "..mn.." - loading...", Color3.fromRGB(100,200,255))
+    -- [v52 FIX 1] Delay 2 detik setelah masuk map (stabilize + boss spawn)
+    AscStatusUpdate("[~] Dalam Tower "..mn.." - stabilize 2s...", Color3.fromRGB(100,200,255))
+    task.wait(2)
+    if not ASC.running then ASC.inMap = false; break end
 
-    -- [v48] SUCCESS/FAIL event listener (sama seperti RAID)
+    -- SUCCESS/FAIL event listener
     local _ascDone = false
     local _ascSuccess = false
     local connAS, connAF
@@ -8216,9 +8232,8 @@ function StartAscensionLoop()
     if _reAS then connAS = _reAS.OnClientEvent:Connect(function() _ascDone = true; _ascSuccess = true end) end
     if _reAF then connAF = _reAF.OnClientEvent:Connect(function() _ascDone = true end) end
 
-    -- [v48] AUTO BOSS KILL - sama persis dengan AUTO RAID
     if ASC.autoKillBoss then
-     -- BOSS_KEYS untuk Ascension Tower (semua boss AT + boss normal)
+     -- BOSS_KEYS untuk Ascension Tower
      local BOSS_KEYS_ASC = {
       "goblin king","giant arachnid","buryura","igris",
       "leader of the polar","arch lich","kargalgan","baran",
@@ -8229,79 +8244,46 @@ function StartAscensionLoop()
       "legendary super saiyan","broly",
       "goku[super4]","goku super4","goku super 4",
      }
-     local function IsBossAsc(name)
-      local n = name:lower()
-      for _, k in ipairs(BOSS_KEYS_ASC) do if n:find(k,1,true) then return true end end
-      return false
-     end
-     -- Prioritaskan nama boss dari entry jika ada
      local _ascHintName = raidEntry.bossName and raidEntry.bossName:lower() or nil
      local function IsBossAscWithHint(name)
       local n = name:lower()
       if _ascHintName and n:find(_ascHintName,1,true) then return true end
-      return IsBossAsc(name)
+      for _, k in ipairs(BOSS_KEYS_ASC) do if n:find(k,1,true) then return true end end
+      return false
      end
 
-     -- Early boss detection selama loading
-     local _earlyBoss = nil
-     local _loadWait = 0
-     while _loadWait < 8 and ASC.running and not _ascDone do
-      task.wait(0.5); _loadWait = _loadWait + 0.5
-      if _loadWait >= 1 and not _earlyBoss then
-       for _, e in ipairs(GetRaidEnemies()) do
-        if IsBossAscWithHint(e.model.Name) then _earlyBoss = e; break end
-       end
-      end
-      if _earlyBoss then
-       local _ep = _earlyBoss.hrp and _earlyBoss.hrp.Parent and _earlyBoss.hrp.Position
-       if _ep and _ep.Y > -200 and _ep.Magnitude > 1 and _loadWait >= 1.5 then break end
-       if _ep and (_ep.Y <= -200 or _ep.Magnitude <= 1) then _earlyBoss = nil end
-      end
-     end
+     -- [v52 FIX 1] Cari boss langsung setelah delay 2s (bukan 8s loading + 30s scan)
+     -- Scan cepat dulu, lalu fallback scan workspace descendants jika belum ketemu
+     local boss = nil
+     AscStatusUpdate("[?] Find Boss...", Color3.fromRGB(160,148,135))
 
-     -- [v48] Event-based boss detection (sama dengan RAID)
-     local boss = (_earlyBoss and IsBossAscWithHint(_earlyBoss.model.Name)) and _earlyBoss or nil
-     local _bossEventConns = {}
-     local function _tryAddBoss(obj)
-      if boss or not obj:IsA("Model") then return end
-      if IsBossAscWithHint(obj.Name) then
-       local g = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid") or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
-       local hrp = obj:FindFirstChild("HumanoidRootPart")
-       local hum = obj:FindFirstChildOfClass("Humanoid")
-       if g and hrp and hum and hum.Health > 0 then
-        boss = {guid=g, hrp=hrp, model=obj}
-       end
-      end
-     end
-     for _, fname in ipairs({"Bosses","Boss","RaidBoss","Enemys","Enemy","Enemies","RaidEnemys","Monsters"}) do
-      local folder = workspace:FindFirstChild(fname)
-      if folder then
-       table.insert(_bossEventConns, folder.ChildAdded:Connect(_tryAddBoss))
-      end
-     end
-     table.insert(_bossEventConns, workspace.ChildAdded:Connect(function(obj)
-      if obj:IsA("Folder") or obj:IsA("Model") then
-       _tryAddBoss(obj)
-       pcall(function()
-        table.insert(_bossEventConns, obj.ChildAdded:Connect(_tryAddBoss))
-        for _, child in ipairs(obj:GetChildren()) do _tryAddBoss(child) end
-       end)
-      end
-     end))
-
-     -- Cari boss (max 30s, sama dengan RAID)
-     local waitBoss = 0
-     while ASC.running and not boss and waitBoss < 30 and not _ascDone do
+     -- Scan pertama dari GetRaidEnemies (max 10s)
+     local _findWait = 0
+     while ASC.running and not boss and _findWait < 10 and not _ascDone do
       for _, e in ipairs(GetRaidEnemies()) do
        if IsBossAscWithHint(e.model.Name) then boss = e; break end
       end
       if not boss then
-       AscStatusUpdate("Find Boss... ("..math.floor(waitBoss).."s/30s)", Color3.fromRGB(160,148,135))
-       task.wait(0.3); waitBoss = waitBoss + 0.3
+       AscStatusUpdate("Find Boss... ("..math.floor(_findWait).."s/10s)", Color3.fromRGB(160,148,135))
+       task.wait(0.3); _findWait = _findWait + 0.3
       end
      end
-     for _, c in ipairs(_bossEventConns) do pcall(function() c:Disconnect() end) end
-     _bossEventConns = {}
+
+     -- Fallback: scan workspace:GetDescendants() jika belum ketemu
+     if not boss and ASC.running and not _ascDone then
+      pcall(function()
+       for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") and IsBossAscWithHint(obj.Name) then
+         local g = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid") or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
+         local hrp = obj:FindFirstChild("HumanoidRootPart")
+         local hum = obj:FindFirstChildOfClass("Humanoid")
+         if g and hrp and hum and hum.Health > 0 then
+          boss = {guid=g, hrp=hrp, model=obj}; break
+         end
+        end
+       end
+      end)
+     end
 
      -- Helper bossPos yang aman
      local function GetSafeAscBossPos()
@@ -8315,42 +8297,24 @@ function StartAscensionLoop()
      if boss and ASC.running and not _ascDone then
       local bossGuid = boss.guid
       local bossPos = GetSafeAscBossPos()
-      if not bossPos then
-       local _waitPos = 0
-       while not bossPos and _waitPos < 3 and ASC.running and not _ascDone do
-        task.wait(0.3); _waitPos = _waitPos + 0.3
-        bossPos = GetSafeAscBossPos()
-       end
-      end
-
-      -- [v48] Countdown bossDelay user-controlled (sama dengan RAID)
-      local _bd = math.max(1, math.min(10, ASC.bossDelay or 3))
-      for _ci = _bd, 1, -1 do
-       if not ASC.running or _ascDone then break end
-       AscStatusUpdate("[K] Boss: "..boss.model.Name.." - TP ".._ci.."s...", Color3.fromRGB(255,160,60))
-       task.wait(1)
-      end
-
-      -- Refresh bossPos setelah countdown
-      bossPos = GetSafeAscBossPos()
-      local _refreshWait = 0
-      while not bossPos and _refreshWait < 3 and ASC.running and not _ascDone do
-       task.wait(0.3); _refreshWait = _refreshWait + 0.3
+      -- Tunggu posisi boss valid max 3s
+      local _wpWait = 0
+      while not bossPos and _wpWait < 3 and ASC.running and not _ascDone do
+       task.wait(0.3); _wpWait = _wpWait + 0.3
        bossPos = GetSafeAscBossPos()
       end
 
       if ASC.running and not _ascDone and bossPos then
-       AscStatusUpdate("[K] Boss: "..boss.model.Name.." - Attack!", Color3.fromRGB(255,80,80))
+       AscStatusUpdate("[K] Boss: "..boss.model.Name.." - TP ke Boss!", Color3.fromRGB(255,160,60))
 
-       -- 1) TP Player ke boss
+       -- [v52 FIX 1] TP Player ke boss
        pcall(function()
         local char = LP.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         local safePos = GetSafeAscBossPos()
         if hrp and safePos then hrp.CFrame = CFrame.new(safePos + Vector3.new(3,0,0)) end
        end)
-
-       -- 2) TP semua hero client-side ke boss
+       -- TP semua hero ke boss
        pcall(function()
         local safePos2 = GetSafeAscBossPos()
         if not safePos2 then return end
@@ -8358,14 +8322,11 @@ function StartAscensionLoop()
         if heroFolder then
          for _, hModel in ipairs(heroFolder:GetChildren()) do
           local hHrp = hModel:FindFirstChild("HumanoidRootPart")
-          if hHrp then
-           hHrp.CFrame = CFrame.new(safePos2 + Vector3.new(math.random(-2,2),0,math.random(-2,2)))
-          end
+          if hHrp then hHrp.CFrame = CFrame.new(safePos2 + Vector3.new(math.random(-2,2),0,math.random(-2,2))) end
          end
         end
        end)
-
-       -- 3) Fire hero remotes
+       -- Fire hero remotes
        pcall(function()
         local safePos3 = GetSafeAscBossPos()
         if safePos3 then FireHeroRemotes(bossGuid, safePos3) end
@@ -8374,43 +8335,20 @@ function StartAscensionLoop()
         local safePos3b = GetSafeAscBossPos()
         if safePos3b then
          for _, hGuid in ipairs(HERO_GUIDS) do
-          pcall(function()
-           RE.HeroStand:FireServer({ heroGuid=hGuid, userId=MY_USER_ID, standPos=safePos3b+Vector3.new(1,0,1) })
-          end)
+          pcall(function() RE.HeroStand:FireServer({ heroGuid=hGuid, userId=MY_USER_ID, standPos=safePos3b+Vector3.new(1,0,1) }) end)
          end
         end
        end
-
-       -- 4) UnEquip -> EquipBest
+       -- UnEquip -> EquipBest
        task.wait(0.3)
        if RE.UnEquipHero then pcall(function() RE.UnEquipHero:FireServer() end) end
        task.wait(0.3)
        if RE.EquipBestHero then pcall(function() RE.EquipBestHero:FireServer() end) end
        task.wait(0.3)
 
-       -- 5) TP ulang hero setelah re-equip
-       pcall(function()
-        local safePos5 = GetSafeAscBossPos()
-        if not safePos5 then return end
-        local heroFolder = workspace:FindFirstChild("Heros")
-        if heroFolder then
-         for _, hModel in ipairs(heroFolder:GetChildren()) do
-          local hHrp = hModel:FindFirstChild("HumanoidRootPart")
-          if hHrp then
-           hHrp.CFrame = CFrame.new(safePos5 + Vector3.new(math.random(-2,2),0,math.random(-2,2)))
-          end
-         end
-        end
-       end)
-       pcall(function()
-        local safePos5b = GetSafeAscBossPos()
-        if safePos5b then FireHeroRemotes(bossGuid, safePos5b) end
-       end)
-
-       -- 6) Background thread: TP player+hero terus ke boss tiap 0.5s
+       -- Background thread: TP player+hero terus ke boss tiap 0.5s selama attack
        local _tpTh = task.spawn(function()
         while ASC.running and not _ascDone do
-         -- [v48] Stop TP jika sudah keluar Ascension Tower
          local _tpMap = GetCurrentMapId()
          if _tpMap and (_tpMap < 50301 or _tpMap > 50326) then break end
          pcall(function()
@@ -8423,17 +8361,13 @@ function StartAscensionLoop()
           if heroFolder then
            for _, hModel in ipairs(heroFolder:GetChildren()) do
             local hHrp = hModel:FindFirstChild("HumanoidRootPart")
-            if hHrp then
-             hHrp.CFrame = CFrame.new(pos + Vector3.new(math.random(-2,2),0,math.random(-2,2)))
-            end
+            if hHrp then hHrp.CFrame = CFrame.new(pos + Vector3.new(math.random(-2,2),0,math.random(-2,2))) end
            end
           end
           FireHeroRemotes(bossGuid, pos)
           if RE.HeroStand then
            for _, hGuid in ipairs(HERO_GUIDS) do
-            pcall(function()
-             RE.HeroStand:FireServer({ heroGuid=hGuid, userId=MY_USER_ID, standPos=pos+Vector3.new(1,0,1) })
-            end)
+            pcall(function() RE.HeroStand:FireServer({ heroGuid=hGuid, userId=MY_USER_ID, standPos=pos+Vector3.new(1,0,1) }) end)
            end
           end
          end)
@@ -8441,10 +8375,9 @@ function StartAscensionLoop()
         end
        end)
 
-       -- 7) Serang boss (sama dengan RAID: 0.08s per attack)
+       -- [v52 FIX 1] Serang boss sampai mati (0.08s per attack)
        AscStatusUpdate("[FLa] Attack: "..boss.model.Name, Color3.fromRGB(255,80,80))
        while ASC.running and not _ascDone do
-        -- [v48] Validasi: player harus masih di Ascension Tower
         local _curMap = GetCurrentMapId()
         if _curMap and (_curMap < 50301 or _curMap > 50326) then
          AscStatusUpdate("[!] Player keluar Tower - stop attack", Color3.fromRGB(255,140,0))
@@ -8465,24 +8398,9 @@ function StartAscensionLoop()
        AscStatusUpdate("[FLa] Boss Dead!", Color3.fromRGB(100,255,150))
       end -- if bossPos
      else
-      -- Boss tidak ditemukan setelah 30s - last chance scan
-      if not boss then
-       pcall(function()
-        for _, obj in ipairs(workspace:GetDescendants()) do
-         if obj:IsA("Model") and IsBossAscWithHint(obj.Name) then
-          local g = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid") or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
-          local hrp = obj:FindFirstChild("HumanoidRootPart")
-          local hum = obj:FindFirstChildOfClass("Humanoid")
-          if g and hrp and hum and hum.Health > 0 then
-           boss = {guid=g, hrp=hrp, model=obj}; break
-          end
-         end
-        end
-       end)
-      end
       if not boss and ASC.running then
-       AscStatusUpdate("[FLa] Boss not found (30s) - Go Out...", Color3.fromRGB(255,150,50))
-       task.wait(3)
+       AscStatusUpdate("[FLa] Boss not found - Go Out...", Color3.fromRGB(255,150,50))
+       task.wait(2)
       end
      end
     else
@@ -8490,7 +8408,6 @@ function StartAscensionLoop()
      local _wt = 0
      while ASC.running and not _ascDone and _wt < 300 do
       task.wait(1); _wt = _wt + 1
-      -- Guard keluar Tower
       local wm = _readMapId()
       if wm == 0 or (wm >= 50001 and wm <= 50028) then break end
      end
@@ -8506,24 +8423,30 @@ function StartAscensionLoop()
     end
     if not ASC.running then break end
 
-    -- Wait reward
+    -- [v52 FIX 2] Claim reward chest ke server (GainRaidsRewards) + collect item
     if _ascSuccess then
-     AscStatusUpdate("[..] Wait 1s (Get reward)...", Color3.fromRGB(100,255,150))
-     task.wait(1)
+     AscStatusUpdate("[..] Claim Reward...", Color3.fromRGB(100,255,150))
+     task.wait(0.5)
+     -- GainRaidsRewards: konfirmasi reward ke server (WAJIB, tanpa ini reward tidak masuk)
+     if RE.GainRaidsRewards then
+      pcall(function() RE.GainRaidsRewards:InvokeServer(1) end)
+     end
+     task.wait(0.5)
+     -- Collect item yang jatuh di map
+     task.spawn(function() pcall(RaidCollectAll) end)
+     task.wait(0.5)
     end
     if not ASC.running then break end
 
-    -- STEP 5: Collect + Exit Tower
-    task.spawn(function() pcall(RaidCollectAll) end)
-    AscStatusUpdate("[FLa] Go Out Tower...", Color3.fromRGB(100,200,255))
-
+    -- STEP 5: Bersihkan entry + Exit Tower
     RAID_LIVE[raidEntry.rawId] = nil
     if raidEntry.rawId ~= raidEntry.id then RAID_LIVE[raidEntry.id] = nil end
     if RebuildRaidList then pcall(RebuildRaidList) end
 
     AscStatusUpdate(("[<] Go Out Tower -> Map %d..."):format(_ascBaseMapId - 50000), Color3.fromRGB(100,200,255))
     local _exitRe = Remotes:FindFirstChild("QuitRaidsMap")
-    -- Helper TP sesuai range map (Map 1-4 pakai StartTp, sisanya LocalTp)
+
+    -- Helper TP keluar sesuai range map + LocalPlayerTeleportSuccess konfirmasi ke server
     local function _fireTpAsc(mapId)
      local m = mapId - 50000
      if m >= 1 and m <= 4 then
@@ -8531,29 +8454,28 @@ function StartAscensionLoop()
      else
       pcall(function() RE.LocalTp:FireServer({ mapId = mapId }) end)
      end
+     task.wait(0.3)
+     -- [v52 FIX 3] LocalPlayerTeleportSuccess WAJIB setelah setiap TP keluar
+     -- Tanpa ini server tidak konfirmasi player keluar → bisa di-kick balik
+     if RE.LocalTpSuccess then
+      task.spawn(function() pcall(function() RE.LocalTpSuccess:InvokeServer() end) end)
+     end
     end
-    -- [FIX v51] Exit Tower - flow identik dengan RAID normal
-    -- 1) Fire QuitRaidsMap + TP berlapis
-    -- 2) Retry max 5x selama masih di Tower
-    -- 3) Tunggu konfirmasi di lobby (50001-50020)
-    -- 4) Release MODE
 
-    -- Cek apakah masih di area Tower (50301-50326)
-    -- TIDAK return false saat wm==0 (transisi map) agar retry tetap jalan
     local function _inAscArea()
      local wm = _readMapId()
-     if wm == 0 then return true end -- transisi map = anggap masih di Tower, lanjut retry
+     if wm == 0 then return true end
      return (wm >= 50301 and wm <= 50326)
     end
 
-    -- Fire pertama
+    -- Fire exit pertama: QuitRaidsMap + TP
     if _exitRe then
      pcall(function() _exitRe:FireServer({ currentSlotIndex = 2, toMapId = _ascBaseMapId }) end)
     end
     task.wait(0.3)
     _fireTpAsc(_ascBaseMapId)
 
-    -- Retry max 5x (sama dengan RAID)
+    -- Retry max 5x jika masih di Tower
     local _exitTry = 0
     while _inAscArea() and _exitTry < 5 and ASC.running do
      _exitTry = _exitTry + 1
@@ -8572,7 +8494,6 @@ function StartAscensionLoop()
      while ASC.running and _lobWait < 30 do
       local _wm3 = _readMapId()
       if _wm3 >= 50001 and _wm3 <= 50020 then break end
-      -- Jika masih stuck di Tower setelah 5 detik, retry TP sekali lagi
       if _lobWait > 0 and _lobWait % 5 == 0 then
        if _exitRe then pcall(function() _exitRe:FireServer({ currentSlotIndex=2, toMapId=_ascBaseMapId }) end) end
        task.wait(0.2)
@@ -12335,21 +12256,11 @@ StartSiegeLoop = function()
                 break
             end
 
-            -- [v52 FIX] Bersihkan cooldown _recentEntered yang sudah > 3 detik
-            if SIEGE._recentEntered then
-                local _now = os.time()
-                for _cid, _t in pairs(SIEGE._recentEntered) do
-                    if _now - _t >= 3 then SIEGE._recentEntered[_cid] = nil end
-                end
-            end
-
             local targetMap = nil
             for _, mn in ipairs(SIEGE_MAP_NUMS) do
                 if not (SIEGE.excludeMaps and SIEGE.excludeMaps[mn]) then
                     local cid = SIEGE_DATA[mn].cityRaidId
-                    -- [v52 FIX] Skip siege yg masih dalam cooldown 3 detik (baru saja selesai)
-                    local onCooldown = SIEGE._recentEntered and SIEGE._recentEntered[cid]
-                    if SIEGE.live[cid] and not onCooldown then targetMap = mn; break end
+                    if SIEGE.live[cid] then targetMap = mn; break end
                 end
             end
 
@@ -12512,13 +12423,7 @@ StartSiegeLoop = function()
             MODE:ForceRelease("siege") -- [v50] force release
 
             task.wait(0.3)
-            -- [v52 FIX] JANGAN hapus SIEGE.live[cityRaidId] secara manual!
-            -- Biarkan listener UpdateCityRaidInfo (event "CloseCityRaid") yang hapus,
-            -- karena siege di server bisa masih terbuka setelah kita keluar.
-            -- Menghapus manual menyebabkan loop tidak bisa re-enter siege yg masih buka.
-            -- Set cooldown agar tidak langsung re-enter siege yang sama dalam 3 detik
-            if not SIEGE._recentEntered then SIEGE._recentEntered = {} end
-            SIEGE._recentEntered[d.cityRaidId] = os.time()
+            SIEGE.live[d.cityRaidId] = nil
             if _siegeChatOpen then _siegeChatOpen[targetMap] = false end
             SIEGE.count[targetMap] = (SIEGE.count[targetMap] or 0) + 1
             SiegeCounterUpdate()
@@ -12526,7 +12431,7 @@ StartSiegeLoop = function()
             MODE:ForceRelease("siege") -- [v50] force release
             SiegeStatus("[OK] "..d.name.." SUCCES! Waiting Next Siege...", Color3.fromRGB(100,255,150))
             if SIEGE.dot then SIEGE.dot.BackgroundColor3 = Color3.fromRGB(255,200,60) end
-            task.wait(3)
+            task.wait(2)
             until true
         end 
 
@@ -12786,25 +12691,17 @@ DungeonStatus = function(msg, color)
 end
 
 local function IsInDungeonMap()
- local ok, wm = pcall(function()
- return _readMapId()
- end)
- if ok and type(wm) == "number" then
- if wm == DUNGEON_MAP_ID then return true, wm end
- end
- -- Fallback: cek folder Map di workspace
- local ok2, hasMap = pcall(function()
- local mf = workspace:FindFirstChild("Map")
- return mf and mf:FindFirstChild("MessageBoard") ~= nil
- end)
- if ok2 and hasMap then return true, nil end
- -- [FIX v38] Fallback tambahan: cek ada enemy di workspace.Enemys
- local ok3, enemies = pcall(function()
- return #workspace:FindFirstChild("Enemys"):GetChildren() > 3
- end)
- if ok3 and enemies then return true, nil end
- if DUNGEON and DUNGEON.inMap then return true, nil end
- return false, nil
+    -- [v52 FIX] Sumber kebenaran utama: MapId harus == 50303
+    -- Hapus fallback cek Enemys > 3 yang false-positive di map lain (bug utama attack di map lain)
+    local ok, wm = pcall(function() return _readMapId() end)
+    if ok and type(wm) == "number" then
+        if wm == DUNGEON_MAP_ID then return true, wm end
+        -- MapId jelas bukan dungeon -> langsung false
+        if wm ~= 0 then return false, wm end
+    end
+    -- Fallback hanya saat mapId == 0 (transisi map): cek flag DUNGEON.inMap
+    if DUNGEON and DUNGEON.inMap then return true, nil end
+    return false, nil
 end
 
 -- Listener ChangeTowerState dari server
@@ -13019,18 +12916,57 @@ local function DungeonTpOut()
 end
 
 -- Masuk dungeon
+-- [v52 FIX] Flow sesuai SimpleSPY:
+-- 1. TP ke Map 5 dulu (jika belum di sana)
+-- 2. LocalPlayerTeleport:FireServer({mapId=50303})
+-- 3. StartLocalPlayerTeleport:FireServer({mapId=50303})
+-- 4. EquipHeroWithData:FireServer()
+-- 5. LocalPlayerTeleportSuccess:InvokeServer()
 local function DungeonTpIn()
- local startTpRe = Remotes:FindFirstChild("StartLocalPlayerTeleport")
- if startTpRe then
- pcall(function() startTpRe:FireServer({mapId = DUNGEON_MAP_ID}) end)
- end
- task.wait(0.3)
- local ltpSucc = Remotes:FindFirstChild("LocalPlayerTeleportSuccess")
- if ltpSucc then
- task.spawn(function()
- pcall(function() ltpSucc:InvokeServer() end)
- end)
- end
+    -- STEP 1: Pastikan player di Map 5 dulu sebelum masuk dungeon
+    local curMap = _readMapId()
+    if curMap ~= DUNGEON_LOBBY_ID then
+        DungeonStatus("[TP] Menuju Map 5 dulu...", Color3.fromRGB(255,200,60))
+        local _localTp = Remotes:FindFirstChild("LocalPlayerTeleport")
+        if _localTp then
+            pcall(function() _localTp:FireServer({mapId = DUNGEON_LOBBY_ID}) end)
+        end
+        -- Tunggu konfirmasi di Map 5 max 8 detik
+        local _wLobby = 0
+        while _readMapId() ~= DUNGEON_LOBBY_ID and _wLobby < 8 and DUNGEON.running do
+            task.wait(0.3); _wLobby = _wLobby + 0.3
+        end
+        task.wait(0.3)
+    end
+
+    -- STEP 2: LocalPlayerTeleport ke dungeon (50303)
+    local _localTp2 = Remotes:FindFirstChild("LocalPlayerTeleport")
+    if _localTp2 then
+        pcall(function() _localTp2:FireServer({mapId = DUNGEON_MAP_ID}) end)
+    end
+    task.wait(0.3)
+
+    -- STEP 3: StartLocalPlayerTeleport ke dungeon (50303)
+    local _startTp = Remotes:FindFirstChild("StartLocalPlayerTeleport")
+    if _startTp then
+        pcall(function() _startTp:FireServer({mapId = DUNGEON_MAP_ID}) end)
+    end
+    task.wait(0.5)
+
+    -- STEP 4: EquipHeroWithData (konfirmasi hero ke server)
+    local _eqRe = Remotes:FindFirstChild("EquipHeroWithData")
+    if _eqRe then
+        pcall(function() _eqRe:FireServer() end)
+    end
+    task.wait(0.3)
+
+    -- STEP 5: LocalPlayerTeleportSuccess (konfirmasi TP ke server)
+    local _ltpSucc = Remotes:FindFirstChild("LocalPlayerTeleportSuccess")
+    if _ltpSucc then
+        task.spawn(function()
+            pcall(function() _ltpSucc:InvokeServer() end)
+        end)
+    end
 end
 
 StartDungeonLoop = function()
@@ -13138,36 +13074,44 @@ StartDungeonLoop = function()
  break
  end
 
- -- 
- -- STEP 4: Cek apakah sudah di dalam dungeon
- -- 
+ --
+ -- STEP 4: TP ke Map 5 dulu, lalu masuk dungeon
+ -- [v52 FIX] Gunakan DungeonTpIn yang sudah diperbaiki
+ --
  local alreadyIn, _ = IsInDungeonMap()
  if not alreadyIn then
- DungeonStatus("[>>] ENTER dungeon...", Color3.fromRGB(180,120,255))
- if DUNGEON.dot then DUNGEON.dot.BackgroundColor3 = Color3.fromRGB(180,120,255) end
+    DungeonStatus("[>>] ENTER dungeon (Map5 -> 50303)...", Color3.fromRGB(180,120,255))
+    if DUNGEON.dot then DUNGEON.dot.BackgroundColor3 = Color3.fromRGB(180,120,255) end
 
- DungeonTpIn()
+    DungeonTpIn()
 
- -- Tunggu konfirmasi masuk max 15 detik
- local _entered = false
- local _entWait = 0
- while not _entered and _entWait < 15 and DUNGEON.running do
- task.wait(0.3); _entWait = _entWait + 0.3
- local inD, _ = IsInDungeonMap()
- if inD then _entered = true; break end
- -- Fallback: cek ada enemy di workspace.Enemys
- if #GetSiegeEnemies() > 0 then _entered = true; break end
- end
+    -- Tunggu konfirmasi masuk max 15 detik (cek MapId == 50303 saja)
+    local _entered = false
+    local _entWait = 0
+    while not _entered and _entWait < 15 and DUNGEON.running do
+        task.wait(0.3); _entWait = _entWait + 0.3
+        local inD, _ = IsInDungeonMap()
+        if inD then _entered = true; break end
+        -- Retry fire remote tiap 5 detik jika belum masuk
+        if not _entered and _entWait > 0 and math.floor(_entWait * 10) % 50 == 0 then
+            DungeonStatus("[~] Retry masuk dungeon...", Color3.fromRGB(255,200,60))
+            local _stp = Remotes:FindFirstChild("StartLocalPlayerTeleport")
+            if _stp then pcall(function() _stp:FireServer({mapId = DUNGEON_MAP_ID}) end) end
+            task.wait(0.3)
+            local _eq = Remotes:FindFirstChild("EquipHeroWithData")
+            if _eq then pcall(function() _eq:FireServer() end) end
+        end
+    end
 
- if not _entered then
- DungeonStatus("[!] Failure Enter - Waiting Next DUNGEON", Color3.fromRGB(255,100,60))
- DUNGEON.towerState = 1
- DUNGEON.interrupt = false
- _siegeInterrupt = false
- _raidInterrupt = false
- MODE:Release("dungeon") -- [v252]
- task.wait(3); break
- end
+    if not _entered then
+        DungeonStatus("[!] Failure Enter - Waiting Next DUNGEON", Color3.fromRGB(255,100,60))
+        DUNGEON.towerState = 1
+        DUNGEON.interrupt = false
+        _siegeInterrupt = false
+        _raidInterrupt = false
+        MODE:Release("dungeon")
+        task.wait(3); break
+    end
  else
  end
 
