@@ -6968,8 +6968,9 @@ _WH.SendRaid = function(url)
 
  local normalRaids, atRaids = {}, {}
  for _, entry in ipairs(raidList) do
- local mn = (entry.mapId or 50000) - 50000
- local isAT = entry.isAT or (entry.raidId and entry.raidId >= 935001) or (mn >= 20)
+ -- [FIX Map 20] Gunakan flag isAscension dari entry, bukan mn >= 20
+ -- Map 20 normal (raidId positif) harus masuk normalRaids, bukan atRaids
+ local isAT = entry.isAscension == true or (entry.raidId and entry.raidId < 0) or (entry.raidId and entry.raidId >= 935001)
  if isAT then table.insert(atRaids, entry)
  else table.insert(normalRaids, entry) end
  end
@@ -7237,17 +7238,25 @@ ParseRaidEntry = function(k, info)
  local rankLbl = grade ~= "?" and ("["..grade.."]") or "[?]"
  -- [FIX Ascension] Preserve isAscension dan bossName dari entry chat yang sudah ada
  -- (Chat parser buat entry negatif dulu, ParseRaidEntry replace dengan raidId asli dari server)
+ -- [FIX Map 20] Map 20 normal dan Ascension Tower 20 punya mapId/mapNum sama (50020/20)
+ -- Gunakan raidId > 0 sebagai penjaga: entry ini adalah raid NORMAL, jangan warisi isAscension
  local _prevAsc = false
  local _prevBossName = nil
- local _ascCacheKey = -(mapId) -- key negatif = entry chat Ascension
- if RAID_LIVE[_ascCacheKey] and RAID_LIVE[_ascCacheKey].isAscension then
-  _prevAsc = true
-  _prevBossName = RAID_LIVE[_ascCacheKey].bossName
-  RAID_LIVE[_ascCacheKey] = nil -- hapus entry temp chat
- elseif _runeGradeCache and _runeGradeCache[-mapNum] then
-  -- Ada grade cache negatif = pernah terdeteksi sebagai Ascension dari chat
-  _prevAsc = true
+ -- Hanya cek Ascension cache jika mapNum < 20 (Map 20 tidak punya Ascension Tower versi berbeda)
+ -- Atau lebih tepatnya: hanya preserve jika raidId dari server positif DAN bukan Map 20
+ if mapNum < 20 then
+  local _ascCacheKey = -(mapId) -- key negatif = entry chat Ascension
+  if RAID_LIVE[_ascCacheKey] and RAID_LIVE[_ascCacheKey].isAscension then
+   _prevAsc = true
+   _prevBossName = RAID_LIVE[_ascCacheKey].bossName
+   RAID_LIVE[_ascCacheKey] = nil -- hapus entry temp chat
+  elseif _runeGradeCache and _runeGradeCache[-mapNum] then
+   -- Ada grade cache negatif = pernah terdeteksi sebagai Ascension dari chat
+   _prevAsc = true
+  end
  end
+ -- [FIX Map 20] Pastikan entry normal (raidId positif) tidak pernah di-mark isAscension
+ if raidId > 0 then _prevAsc = false end
  RAID_LIVE[raidId] = {
  raidId = raidId,
  mapId = mapId,
@@ -8757,23 +8766,31 @@ local function ResolveEntry()
  -- 
  RaidStatusUpdate("[~] Waiting...", Color3.fromRGB(180,100,255))
  local _tpOk = false
+ local _mapIdOk = false
  local _tpWait = 0
- while not _tpOk and _tpWait < 10 and RAID.running do
- task.wait(0.3); _tpWait = _tpWait + 0.3
- pcall(function()
- local wMapId = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
- if wMapId then
- if RAID.serverMapId and wMapId == RAID.serverMapId then
- _tpOk = true
- elseif RAID.runeEnabled then
- local ok = (wMapId >= 50101 and wMapId <= 50118)
- if ok then RAID.serverMapId = wMapId; _tpOk = true end
- elseif (wMapId >= 50101 and wMapId <= 50118) then
- _tpOk = true
- end
- end
- end)
- if not _tpOk and #GetEnemies() > 0 then _tpOk = true end
+ -- [FIX] Dua kondisi WAJIB sebelum lanjut:
+ -- 1. workspace.MapId sudah masuk range raid (50101-50120)
+ -- 2. Ada enemy yang sudah spawn di workspace (GetRaidEnemies > 0)
+ -- Mencegah TP ke boss saat map masih loading dan enemy belum ada
+ while not _tpOk and _tpWait < 15 and RAID.running do
+  task.wait(0.3); _tpWait = _tpWait + 0.3
+  pcall(function()
+   local wMapId = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
+   if wMapId then
+    if RAID.serverMapId and wMapId == RAID.serverMapId then
+     _mapIdOk = true
+    elseif RAID.runeEnabled then
+     local ok = (wMapId >= 50101 and wMapId <= 50120)
+     if ok then RAID.serverMapId = wMapId; _mapIdOk = true end
+    elseif (wMapId >= 50101 and wMapId <= 50120) then
+     _mapIdOk = true
+    end
+   end
+  end)
+  local _enemyReady = #GetRaidEnemies() > 0
+  if _mapIdOk and _enemyReady then _tpOk = true end
+  -- Fallback: enemy sudah ada tapi MapId belum update setelah 3s
+  if not _mapIdOk and _enemyReady and _tpWait >= 3 then _tpOk = true end
  end
 
  if not _tpOk and RAID.running then
@@ -8870,18 +8887,30 @@ local function ResolveEntry()
   return IsBossEarly(name)
  end
 
- while _loadWait < 6 and RAID.running and not RAID._raidDone do
+ while _loadWait < 8 and RAID.running and not RAID._raidDone do
  task.wait(0.5); _loadWait = _loadWait + 0.5
  -- Mulai cari boss sejak detik ke-1 (bukan ke-2)
  if _loadWait >= 1 and not _earlyBoss then
- for _, e in ipairs(GetRaidEnemies()) do
- -- [FIX] Gunakan IsBossEarlyWithHint - sadar hint nama boss Ascension Tower
- if IsBossEarlyWithHint(e.model.Name) then
- _earlyBoss = e; break
+  for _, e in ipairs(GetRaidEnemies()) do
+   -- [FIX] Gunakan IsBossEarlyWithHint - sadar hint nama boss Ascension Tower
+   if IsBossEarlyWithHint(e.model.Name) then
+    _earlyBoss = e; break
+   end
+  end
  end
+ -- [FIX] Jangan break hanya karena boss terdeteksi - validasi posisinya juga
+ -- Boss yang baru spawn sering punya posisi Y tidak valid (masih falling/loading)
+ if _earlyBoss then
+  local _ep = _earlyBoss.hrp and _earlyBoss.hrp.Parent and _earlyBoss.hrp.Position
+  -- Posisi valid: Y > -200, magnitude > 1 (bukan 0,0,0), dan sudah stabil (>= 1.5s)
+  if _ep and _ep.Y > -200 and _ep.Magnitude > 1 and _loadWait >= 1.5 then
+   break -- Boss terdeteksi DAN posisinya sudah valid
+  end
+  -- Belum valid: reset earlyBoss agar dicari ulang di iterasi berikut
+  if _ep and (_ep.Y <= -200 or _ep.Magnitude <= 1) then
+   _earlyBoss = nil -- posisi buruk, cari ulang
+  end
  end
- end
- if _earlyBoss then break end -- Boss ketemu lebih awal, langsung lanjut
  end
 
  if RAID.running and not RAID._raidDone and RAID.autoKillBoss then
@@ -9004,9 +9033,23 @@ local function ResolveEntry()
  -- [v259] Teleport delay user-controlled (RAID.bossDelay 1-10s)
  local _bd = math.max(1, math.min(10, RAID.bossDelay or 3))
  for _ci = _bd, 1, -1 do
- if not RAID.running or RAID._raidDone then break end
- RaidStatusUpdate("[K] Boss: "..boss.model.Name.." - TP ".._ci.."s...", Color3.fromRGB(255,160,60))
- task.wait(1)
+  if not RAID.running or RAID._raidDone then break end
+  RaidStatusUpdate("[K] Boss: "..boss.model.Name.." - TP ".._ci.."s...", Color3.fromRGB(255,160,60))
+  task.wait(1)
+ end
+ -- [FIX] Refresh bossPos SETELAH countdown - posisi boss saat countdown mungkin belum stabil
+ -- Boss yang baru spawn butuh beberapa detik sebelum posisinya final di terrain
+ local _refreshWait = 0
+ bossPos = GetSafeBossPos()
+ while not bossPos and _refreshWait < 3 and RAID.running and not RAID._raidDone do
+  task.wait(0.3); _refreshWait = _refreshWait + 0.3
+  bossPos = GetSafeBossPos()
+ end
+ -- Validasi tambahan: pastikan posisi Y cukup tinggi (bukan void/jurang)
+ if bossPos and bossPos.Y < -100 then
+  RaidStatusUpdate("[!] Posisi boss terlalu rendah - tunggu stabilisasi...", Color3.fromRGB(255,160,60))
+  task.wait(1)
+  bossPos = GetSafeBossPos()
  end
  if RAID.running and not RAID._raidDone and bossPos then
  RaidStatusUpdate("[K] Boss: " .. boss.model.Name .. " - Attack!", Color3.fromRGB(255,80,80))
