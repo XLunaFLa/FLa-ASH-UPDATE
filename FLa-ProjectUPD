@@ -12335,11 +12335,21 @@ StartSiegeLoop = function()
                 break
             end
 
+            -- [v52 FIX] Bersihkan cooldown _recentEntered yang sudah > 3 detik
+            if SIEGE._recentEntered then
+                local _now = os.time()
+                for _cid, _t in pairs(SIEGE._recentEntered) do
+                    if _now - _t >= 3 then SIEGE._recentEntered[_cid] = nil end
+                end
+            end
+
             local targetMap = nil
             for _, mn in ipairs(SIEGE_MAP_NUMS) do
                 if not (SIEGE.excludeMaps and SIEGE.excludeMaps[mn]) then
                     local cid = SIEGE_DATA[mn].cityRaidId
-                    if SIEGE.live[cid] then targetMap = mn; break end
+                    -- [v52 FIX] Skip siege yg masih dalam cooldown 3 detik (baru saja selesai)
+                    local onCooldown = SIEGE._recentEntered and SIEGE._recentEntered[cid]
+                    if SIEGE.live[cid] and not onCooldown then targetMap = mn; break end
                 end
             end
 
@@ -12502,7 +12512,13 @@ StartSiegeLoop = function()
             MODE:ForceRelease("siege") -- [v50] force release
 
             task.wait(0.3)
-            SIEGE.live[d.cityRaidId] = nil
+            -- [v52 FIX] JANGAN hapus SIEGE.live[cityRaidId] secara manual!
+            -- Biarkan listener UpdateCityRaidInfo (event "CloseCityRaid") yang hapus,
+            -- karena siege di server bisa masih terbuka setelah kita keluar.
+            -- Menghapus manual menyebabkan loop tidak bisa re-enter siege yg masih buka.
+            -- Set cooldown agar tidak langsung re-enter siege yang sama dalam 3 detik
+            if not SIEGE._recentEntered then SIEGE._recentEntered = {} end
+            SIEGE._recentEntered[d.cityRaidId] = os.time()
             if _siegeChatOpen then _siegeChatOpen[targetMap] = false end
             SIEGE.count[targetMap] = (SIEGE.count[targetMap] or 0) + 1
             SiegeCounterUpdate()
@@ -12510,7 +12526,7 @@ StartSiegeLoop = function()
             MODE:ForceRelease("siege") -- [v50] force release
             SiegeStatus("[OK] "..d.name.." SUCCES! Waiting Next Siege...", Color3.fromRGB(100,255,150))
             if SIEGE.dot then SIEGE.dot.BackgroundColor3 = Color3.fromRGB(255,200,60) end
-            task.wait(2)
+            task.wait(3)
             until true
         end 
 
