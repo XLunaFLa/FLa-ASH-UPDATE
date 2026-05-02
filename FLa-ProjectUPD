@@ -10329,7 +10329,7 @@ end -- end Auto Raid do block
 -- PANEL : AUTOMATION - Auto Ascension [v46 NEW]
 -- ============================================================
 do
- local p = NewPanel("autoraid") -- pakai panel yg sama (autoraid = Automation)
+ local p = Panels["autoraid"] -- reuse panel yg sudah dibuat oleh Auto Raid (JANGAN NewPanel lagi!)
 
  -- ACCORDION HEADER
  local ascOpen = false
