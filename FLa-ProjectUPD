@@ -1796,13 +1796,14 @@ function AttackLoop_Mass(onStatus)
    or (SIEGE and SIEGE.inMap) then
    return "interrupted"
   end
-  -- [FIX] Hanya serang di BaseMapId normal (50001-50019)
+  -- [FIX GODMODE] Guard: STOP serang jika player bukan di basemap normal (50001-50020)
+  -- Blok Siege (50201+), Raid (50101+), Tower (50300+), dan map lain di luar range
   do
    local ok, wm = pcall(function()
     return workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
    end)
    if ok and type(wm) == "number" then
-    if wm < 50001 or wm > 50019 then
+    if wm < 50001 or wm > 50020 then
      return "interrupted"
     end
    end
@@ -7204,14 +7205,31 @@ ParseRaidEntry = function(k, info)
  local mapName = MAP_NAMES[mapNum] or ("Map "..mapNum)
  local grade = (RAID_CONFIG_GRADE and RAID_CONFIG_GRADE[raidId]) or (_runeGradeCache and _runeGradeCache[mapNum]) or "?"
  local rankLbl = grade ~= "?" and ("["..grade.."]") or "[?]"
+ -- [FIX Ascension] Preserve isAscension dan bossName dari entry chat yang sudah ada
+ -- (Chat parser buat entry negatif dulu, ParseRaidEntry replace dengan raidId asli dari server)
+ local _prevAsc = false
+ local _prevBossName = nil
+ local _ascCacheKey = -(mapId) -- key negatif = entry chat Ascension
+ if RAID_LIVE[_ascCacheKey] and RAID_LIVE[_ascCacheKey].isAscension then
+  _prevAsc = true
+  _prevBossName = RAID_LIVE[_ascCacheKey].bossName
+  RAID_LIVE[_ascCacheKey] = nil -- hapus entry temp chat
+ elseif _runeGradeCache and _runeGradeCache[-mapNum] then
+  -- Ada grade cache negatif = pernah terdeteksi sebagai Ascension dari chat
+  _prevAsc = true
+ end
  RAID_LIVE[raidId] = {
  raidId = raidId,
  mapId = mapId,
  spawnName = spawnName,
  rank = rank,
  grade = grade,
+ isAscension = _prevAsc,
+ bossName = _prevBossName,
  endTime = info.endTime,
- label = "Map "..mapNum.." - "..mapName.." "..rankLbl,
+ label = _prevAsc
+  and ("Ascension Tower "..mapNum..(_prevBossName and (" - "..(_prevBossName:gsub("^%l",string.upper))) or "").." ["..grade.."]")
+  or ("Map "..mapNum.." - "..mapName.." "..rankLbl),
  }
 end
 end
@@ -7439,28 +7457,47 @@ ConnectRaidListeners = function()
  local rank = SPAWN_RANK[spawnName] or 0
  -- [v271] Grade dari RAID_CONFIG_GRADE (formula matematika, cover semua seri)
  local grade = (RAID_CONFIG_GRADE and RAID_CONFIG_GRADE[raidId]) or (_runeGradeCache and _runeGradeCache[mapNum]) or "?"
- local tempKey = -(mapId)
+ local tempKey = -(mapId) -- key entry chat Ascension (negatif)
+ -- [FIX Ascension] Detect apakah entry ini Ascension dari chat cache atau RAID_LIVE
+ local _isAsc = false
+ local _bnAsc = nil
+ if RAID_LIVE[tempKey] and RAID_LIVE[tempKey].isAscension then
+  _isAsc = true; _bnAsc = RAID_LIVE[tempKey].bossName
+ elseif RAID_LIVE[raidId] and RAID_LIVE[raidId].isAscension then
+  _isAsc = true; _bnAsc = RAID_LIVE[raidId].bossName
+ elseif _runeGradeCache and _runeGradeCache[-mapNum] then
+  _isAsc = true -- pernah masuk dari chat sebagai Ascension
+ end
+ local _lbl = _isAsc
+  and ("Ascension Tower "..mapNum..(_bnAsc and (" - "..(_bnAsc:gsub("^%l",string.upper))) or "").." ["..grade.."]")
+  or ("Map "..mapNum.." - "..(MAP_NAMES[mapNum] or "Map "..mapNum).." ["..grade.."](ID:"..raidId..")")
  local entryData = {
  raidId = raidId,
  mapId = mapId,
  spawnName = spawnName,
  rank = rank,
  grade = grade,
+ isAscension = _isAsc, -- [FIX] selalu bawa flag isAscension
+ bossName = _bnAsc,
  endTime = info.endTime,
- label = "Map "..mapNum.." - "..(MAP_NAMES[mapNum] or "Map "..mapNum).." ["..grade.."](ID:"..raidId..")",
+ label = _lbl,
  }
- -- Kalau ada entry temp dari workspace, replace dengan raidId asli
+ -- Kalau ada entry temp dari chat (negatif), replace dengan raidId asli dari server
  if RAID_LIVE[tempKey] then
  RAID_LIVE[raidId] = entryData
  RAID_LIVE[tempKey] = nil
  elseif not RAID_LIVE[raidId] then
- -- Entry baru (workspace belum detect, atau AT)
+ -- Entry baru: ParseRaidEntry sudah di-fix untuk preserve isAscension
  ParseRaidEntry(k, info)
  else
- -- Sudah ada, update grade saja
+ -- Sudah ada, update grade + preserve isAscension yang sudah true
  RAID_LIVE[raidId].grade = grade
  RAID_LIVE[raidId].rank = rank
- RAID_LIVE[raidId].label = entryData.label
+ RAID_LIVE[raidId].label = _lbl
+ if _isAsc then
+  RAID_LIVE[raidId].isAscension = true
+  if _bnAsc then RAID_LIVE[raidId].bossName = _bnAsc end
+ end
  end
  until true
  end
@@ -7619,11 +7656,34 @@ function RaidCollectAll()
  end
 end
 
+-- [FIX GODMODE] Helper: baca mapId player saat ini secara realtime
+local function GetCurrentMapId()
+ local ok, wm = pcall(function()
+  return workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
+ end)
+ return (ok and type(wm) == "number") and wm or nil
+end
+
+-- [FIX GODMODE] Helper: player posisi realtime
+local function GetPlayerPos()
+ local char = LP and LP.Character
+ local hrp = char and char:FindFirstChild("HumanoidRootPart")
+ return hrp and hrp.Position or nil
+end
+
 -- Scan enemy/boss di workspace
 -- [GODMODE FIX] Relax filter jarak, tambah fallback scan seluruh workspace
+-- [GODMODE FIX 2] Validasi mapId realtime - pastikan player di dalam raid map
 function GetRaidEnemies()
  local list = {}
  local seen = {}
+
+ -- [FIX] Validasi: player harus berada di raid map (50101-50120)
+ -- Jika player sudah keluar ke basemap atau map lain, return list kosong
+ local currentMapId = GetCurrentMapId()
+ if currentMapId and (currentMapId < 50101 or currentMapId > 50120) then
+  return list -- player bukan di raid map, jangan ambil enemy apapun
+ end
 
  local activeMapId = RAID and RAID.serverMapId
  local spawnPos = activeMapId and RAID_SPAWN_POS and RAID_SPAWN_POS[activeMapId]
@@ -8721,6 +8781,9 @@ local function ResolveEntry()
  -- 6) Background thread: TP player+hero terus ke boss tiap 0.5s
  local _tpTh = task.spawn(function()
  while RAID.running and not RAID._raidDone do
+ -- [FIX GODMODE] Stop TP jika player sudah keluar dari raid map
+ local _tpMap = GetCurrentMapId()
+ if _tpMap and (_tpMap < 50101 or _tpMap > 50120) then break end
  pcall(function()
  -- [FIX] Selalu ambil posisi live dari boss.hrp, validasi Y sebelum TP
  -- Jangan pernah fallback ke bossPos lama yang mungkin sudah tidak valid
@@ -8761,6 +8824,13 @@ local function ResolveEntry()
  -- 7) SERANG BOSS - langsung tanpa jeda
  RaidStatusUpdate("[FLa] Attack: " .. boss.model.Name, Color3.fromRGB(255,80,80))
  while RAID.running and not RAID._raidDone do
+ -- [FIX GODMODE] Validasi realtime: player harus masih di raid map (50101-50120)
+ -- Jika sudah keluar ke basemap, stop serang boss
+ local _curMap = GetCurrentMapId()
+ if _curMap and (_curMap < 50101 or _curMap > 50120) then
+  RaidStatusUpdate("[!] Player keluar raid map - stop attack boss", Color3.fromRGB(255,140,0))
+  break
+ end
  if not boss.model or not boss.model.Parent then break end
  local hum = boss.model:FindFirstChildOfClass("Humanoid")
  if hum and hum.Health <= 0 then break end
@@ -10270,6 +10340,20 @@ local function SiegeAttackV2_Independent(onStatus, baseMapId)
     -- ============================================================
     while SIEGE.running and SIEGE.inMap do
         totalTime = totalTime + 0.08
+
+        -- [FIX GODMODE] Guard realtime: STOP jika player sudah kembali ke basemap (50001-50020)
+        -- Mencegah Siege terus menyerang musuh di portal basemap setelah keluar dari Siege map
+        do
+            local _ok, _wm = pcall(function()
+                return workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
+            end)
+            if _ok and type(_wm) == "number" then
+                if _wm >= 50001 and _wm <= 50020 then
+                    -- Player sudah di basemap, stop attack siege
+                    cleanup(); return "exited_clean"
+                end
+            end
+        end
 
         -- Server kirim countdown timer dan nama map di sana
         -- Cuma hide popup reward hasil boss saja setelah keluar
