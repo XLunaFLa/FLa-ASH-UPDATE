@@ -8349,7 +8349,7 @@ function StartAscensionLoop()
        -- Background thread: TP player+hero terus ke boss tiap 0.5s selama attack
        local _tpTh = task.spawn(function()
         while ASC.running and not _ascDone do
-         local _tpMap = GetCurrentMapId()
+         local _tpMap = _readMapId() -- [GODMODE FIX v53] GetCurrentMapId belum defined di sini, pakai _readMapId
          if _tpMap and (_tpMap < 50301 or _tpMap > 50326) then break end
          pcall(function()
           local pos = GetSafeAscBossPos()
@@ -8378,7 +8378,7 @@ function StartAscensionLoop()
        -- [v52 FIX 1] Serang boss sampai mati (0.08s per attack)
        AscStatusUpdate("[FLa] Attack: "..boss.model.Name, Color3.fromRGB(255,80,80))
        while ASC.running and not _ascDone do
-        local _curMap = GetCurrentMapId()
+        local _curMap = _readMapId() -- [GODMODE FIX v53] GetCurrentMapId belum defined di sini, pakai _readMapId
         if _curMap and (_curMap < 50301 or _curMap > 50326) then
          AscStatusUpdate("[!] Player keluar Tower - stop attack", Color3.fromRGB(255,140,0))
          break
@@ -8550,11 +8550,13 @@ function StartAscensionLoop()
   end -- while ASC.running
 
   ASC.running = false
-  ASC.inMap   = false
+  ASC.inMap   = false -- [GODMODE FIX v53] WAJIB reset inMap saat stop agar RAID tidak stuck
   _ascOn      = false
   ASC._rrIdx  = 0
   -- [v50] Pastikan lock MODE dilepas saat ASC stop
   if MODE:IsHeld("asc") then MODE:ForceRelease("asc") end
+  -- [GODMODE FIX v53] Wakeup RAID loop yang mungkin sedang menunggu ASC selesai
+  if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
   AscStatusUpdate("Auto Ascension STOP", Color3.fromRGB(160,148,135))
   if ASC.dot then ASC.dot.BackgroundColor3 = Color3.fromRGB(100,100,100) end
  end)
@@ -9225,8 +9227,9 @@ local function ResolveEntry()
      break
  end
  -- [BUG FIX v49] Blokir juga jika ASC.inMap = true (sedang proses join Tower)
- -- Ini mencegah RAID masuk bersamaan saat ASC belum selesai teleport ke Tower
- if ASC.inMap then
+ -- [GODMODE FIX v53] Hanya block jika ASC.running juga true (toggle ON)
+ -- Jika toggle ASC dimatikan, RAID tidak boleh stuck karena sisa ASC.inMap=true
+ if ASC.running and ASC.inMap then
      RaidStatusUpdate("[!] Ascension Tower sedang aktif - Auto Raid skip", Color3.fromRGB(180,100,255))
      task.wait(2)
      break
@@ -9829,6 +9832,7 @@ local function ResolveEntry()
  -- 7) SERANG BOSS - langsung tanpa jeda
  RaidStatusUpdate("[FLa] Attack: " .. boss.model.Name, Color3.fromRGB(255,80,80))
  local _outOfMapCount = 0 -- [BUG FIX v49] debounce counter agar tidak false-break karena lag spike
+ local _bossKilled = false -- [GODMODE FIX v53] flag: boss benar-benar mati (bukan player keluar manual)
  while RAID.running and not RAID._raidDone do
  -- [FIX GODMODE] Validasi realtime: player harus masih di raid map (50101-50120)
  -- Jika sudah keluar ke basemap, stop serang boss
@@ -9837,15 +9841,23 @@ local function ResolveEntry()
  if _curMap and (_curMap < 50101 or _curMap > 50120) then
   _outOfMapCount = _outOfMapCount + 1
   if _outOfMapCount >= 3 then
-   RaidStatusUpdate("[!] Player keluar raid map - stop attack boss", Color3.fromRGB(255,140,0))
+   -- [GODMODE FIX v53] Player keluar MANUAL - jangan anggap sukses, reset state
+   RaidStatusUpdate("[!] Player keluar raid manual - reset state", Color3.fromRGB(255,140,0))
+   _bossKilled = false
    break
   end
  else
   _outOfMapCount = 0
  end
- if not boss.model or not boss.model.Parent then break end
+ if not boss.model or not boss.model.Parent then
+  _bossKilled = true -- model hilang = boss mati oleh server
+  break
+ end
  local hum = boss.model:FindFirstChildOfClass("Humanoid")
- if hum and hum.Health <= 0 then break end
+ if hum and hum.Health <= 0 then
+  _bossKilled = true -- HP 0 = boss mati
+  break
+ end
  local p = GetSafeBossPos()
  if not p then task.wait(0.08); continue end
  task.spawn(function() pcall(function() RaidFireDamage(bossGuid, p) end) end)
@@ -9853,9 +9865,33 @@ local function ResolveEntry()
  end
 
  pcall(function() task.cancel(_tpTh) end)
- _raidSuccess = true
- RAID._raidDone = true
- RaidStatusUpdate("[FLa] Boss Dead!", Color3.fromRGB(100,255,150))
+ -- [GODMODE FIX v53] Hanya sukses jika boss benar-benar mati, bukan keluar manual
+ if _bossKilled then
+  _raidSuccess = true
+  RAID._raidDone = true
+  RaidStatusUpdate("[FLa] Boss Dead!", Color3.fromRGB(100,255,150))
+ else
+  -- Player keluar manual: langsung reset semua state & cooldown, lanjut iterasi loop
+  RAID._raidDone = true
+  _raidSuccess = false
+  if connS then pcall(function() connS:Disconnect() end) end
+  if connF then pcall(function() connF:Disconnect() end) end
+  RAID.inMap = false
+  RAID.fromMapId = nil
+  _raidInterrupt = false
+  MODE:ForceRelease("raid")
+  for cd = 14, 1, -1 do
+   if not RAID.running then break end
+   RaidStatusUpdate("[..] Keluar Manual - Cooldown " .. cd .. "s...", Color3.fromRGB(255,140,0))
+   if RAID.dot then RAID.dot.BackgroundColor3 = Color3.fromRGB(255,200,60) end
+   task.wait(1)
+  end
+  if RAID.running then
+   RaidStatusUpdate("[>>] Siap cari raid baru...", Color3.fromRGB(100,255,150))
+   if RAID.dot then RAID.dot.BackgroundColor3 = Color3.fromRGB(100,100,100) end
+  end
+  break -- kembali ke while RAID.running (loop utama iterasi baru)
+ end
  end -- if RAID.running after delay
  else
  -- [GODMODE FIX] Boss tidak ditemukan setelah 30s - coba sekali lagi scan penuh workspace sebelum menyerah
@@ -10012,13 +10048,16 @@ local function ResolveEntry()
                 isBusy = true
             end
             -- [BUG FIX v49] Cek ASC.inMap: jika Ascension sedang di dalam Tower, RAID harus pause
-            if ASC.inMap then isBusy = true end
+            -- [GODMODE FIX v53] Guard WAJIB gabungkan ASC.running + ASC.inMap
+            -- Jika toggle ASC dimatikan (ASC.running=false), RAID bebas jalan meski ASC.inMap masih true sisa state
+            if ASC.running and ASC.inMap then isBusy = true end
             -- [BUG FIX v49] Juga cek: jika player secara fisik masih di area Ascension Tower (50301-50326)
-            if mapId >= 50301 and mapId <= 50326 then isBusy = true end
+            -- [GODMODE FIX v53] Hanya block jika ASC masih running (toggle ON)
+            if ASC.running and mapId >= 50301 and mapId <= 50326 then isBusy = true end
 
             if isBusy then
                 -- Jika ada Siege/Dungeon/Ascension aktif, diam saja dan JANGAN panggil ResolveEntry
-                if ASC.inMap or (mapId >= 50301 and mapId <= 50326) then
+                if (ASC.running and ASC.inMap) or (ASC.running and mapId >= 50301 and mapId <= 50326) then
                     RaidStatusUpdate("[!] PAUSE: Ascension Tower aktif - menunggu...", Color3.fromRGB(180, 100, 255))
                 else
                     RaidStatusUpdate("[!] PAUSE: Menunggu Siege/Dungeon Selesai...", Color3.fromRGB(255, 100, 100))
