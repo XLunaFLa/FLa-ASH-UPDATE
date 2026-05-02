@@ -7180,9 +7180,12 @@ RebuildRaidList = function()
   end
  end
  -- Sort: normal entries by mapId ascending, Ascension entries setelahnya
+ -- [FIX] Normalisasi isAscension ke boolean agar sort tidak invalid (nil ~= false = true)
  table.sort(sorted, function(a, b)
-  if a.isAscension ~= b.isAscension then
-   return not a.isAscension -- normal dulu
+  local aAsc = a.isAscension and true or false
+  local bAsc = b.isAscension and true or false
+  if aAsc ~= bAsc then
+   return not aAsc -- normal dulu
   end
   return (a.mapId or 0) < (b.mapId or 0)
  end)
@@ -12994,9 +12997,9 @@ do
         end
     end)
 
-    -- ══════════════════════════════════════════════════════
+    -- ======================================================
     -- [SAVE CONFIG / RESET CONFIG] Auto Single Tower Map 2
-    -- ══════════════════════════════════════════════════════
+    -- ======================================================
     local ST2_CONFIG_FILE = "SIEGE_ST2_Config.json"
 
     local function ST2_SaveConfig()
@@ -13084,19 +13087,19 @@ end
 -- SCAN = ambil semua player dari Players service (global workspace)
 -- JOIN = LocalPlayerTeleport:FireServer({mapId=50301, hostId=UserId})
 -- Tidak ada cara mengetahui siapa yg ada di Tower Map 2 dari client,
--- jadi semua player di server ditampilkan → user pilih sendiri → JOIN.
+-- jadi semua player di server ditampilkan -> user pilih sendiri -> JOIN.
 -- ============================================================
 do
     local p = Panels["autoraid"]
     if p then
 
-    -- ── State ──────────────────────────────────────────────────────────────
+    -- -- State --------------------------------------------------------------
     local JTP_players    = {}   -- { {name=string, userId=number} } semua player di server
     local JTP_selIdx     = nil  -- index row yang dipilih
     local JTP_joining    = false
     local JTP_MAPID      = 50301
 
-    -- ── Header collapsible ────────────────────────────────────────────────
+    -- -- Header collapsible ------------------------------------------------
     local jtpOpen = false
 
     local jtpHeader = Btn(p, C.SURFACE, UDim2.new(1,0,0,42))
@@ -13106,7 +13109,7 @@ do
     local jtpArrow = Label(jtpHeader,">",13,Color3.fromRGB(80,200,120),Enum.Font.GothamBold)
     jtpArrow.Size = UDim2.new(0,22,1,0); jtpArrow.Position = UDim2.new(0,10,0,0)
 
-    local jtpHeaderLbl = Label(jtpHeader,"⚡ Join to Tower Player",14,C.TXT2,Enum.Font.GothamBold)
+    local jtpHeaderLbl = Label(jtpHeader,"[!] Join to Tower Player",14,C.TXT2,Enum.Font.GothamBold)
     jtpHeaderLbl.Size = UDim2.new(1,-50,1,0); jtpHeaderLbl.Position = UDim2.new(0,34,0,0)
 
     local jtpBody = Frame(p, C.BG2, UDim2.new(1,0,0,0))
@@ -13137,19 +13140,19 @@ do
         if jtpOpen then task.defer(ResizeJTPBody) end
     end)
 
-    -- ── Info card ─────────────────────────────────────────────────────────
+    -- -- Info card --------------------------------------------------------?
     local infoCard = Frame(jtpInner, C.BG3, UDim2.new(1,0,0,0))
     infoCard.LayoutOrder = 0; infoCard.AutomaticSize = Enum.AutomaticSize.Y; Corner(infoCard,10)
     New("UIPadding",{Parent=infoCard,
         PaddingTop=UDim.new(0,6),PaddingBottom=UDim.new(0,6),
         PaddingLeft=UDim.new(0,10),PaddingRight=UDim.new(0,10)})
     local infoLbl = Label(infoCard,
-        "SCAN = ambil semua player di server (global).\nPilih player yg kamu yakin ada di Tower Map 2,\nlalu tekan JOIN → masuk via hostId = UserId mereka.",
+        "SCAN = ambil semua player di server (global).\nPilih player yg kamu yakin ada di Tower Map 2,\nlalu tekan JOIN -> masuk via hostId = UserId mereka.",
         10, C.TXT3, Enum.Font.Gotham)
     infoLbl.Size = UDim2.new(1,0,0,0); infoLbl.AutomaticSize = Enum.AutomaticSize.Y
     infoLbl.TextWrapped = true; infoLbl.LineHeight = 1.3
 
-    -- ── Status bar ────────────────────────────────────────────────────────
+    -- -- Status bar --------------------------------------------------------
     local jtpStatCard = Frame(jtpInner, C.SURFACE, UDim2.new(1,0,0,28))
     jtpStatCard.LayoutOrder = 1; Corner(jtpStatCard,10)
     New("UIPadding",{Parent=jtpStatCard,PaddingLeft=UDim.new(0,10),PaddingRight=UDim.new(0,10)})
@@ -13161,15 +13164,15 @@ do
         pcall(function() jtpStatLbl.Text = msg; jtpStatLbl.TextColor3 = col or C.TXT3 end)
     end
 
-    -- ── SCAN button ───────────────────────────────────────────────────────
+    -- -- SCAN button ------------------------------------------------------?
     local scanBtn = Btn(jtpInner, Color3.fromRGB(25,65,45), UDim2.new(1,0,0,36))
     scanBtn.LayoutOrder = 2; Corner(scanBtn,10)
     Stroke(scanBtn, Color3.fromRGB(80,200,120), 1.5, 0.15)
-    local scanLbl = Label(scanBtn,"🔍  SCAN  Player (Global Server)",13,
+    local scanLbl = Label(scanBtn,"[SCAN]  SCAN  Player (Global Server)",13,
         Color3.fromRGB(100,230,150), Enum.Font.GothamBold, Enum.TextXAlignment.Center)
     scanLbl.Size = UDim2.new(1,0,1,0)
 
-    -- ── Player list box ───────────────────────────────────────────────────
+    -- -- Player list box --------------------------------------------------?
     -- Scrollable frame agar list panjang tetap rapi
     local listOuter = Frame(jtpInner, C.BG3, UDim2.new(1,0,0,0))
     listOuter.LayoutOrder = 3; listOuter.AutomaticSize = Enum.AutomaticSize.Y
@@ -13179,7 +13182,7 @@ do
         PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),
         PaddingLeft=UDim.new(0,6),PaddingRight=UDim.new(0,6)})
 
-    local listTitleLbl = Label(listOuter,"Pilih player → tap untuk select :",10,C.TXT3,Enum.Font.GothamBold)
+    local listTitleLbl = Label(listOuter,"Pilih player -> tap untuk select :",10,C.TXT3,Enum.Font.GothamBold)
     listTitleLbl.LayoutOrder = 0; listTitleLbl.Size = UDim2.new(1,0,0,20)
 
     local listInner = Frame(listOuter, C.BLACK, UDim2.new(1,0,0,0))
@@ -13190,22 +13193,22 @@ do
 
     local playerRows = {}  -- frame per row
 
-    -- ── JOIN button ───────────────────────────────────────────────────────
+    -- -- JOIN button ------------------------------------------------------?
     local joinBtn = Btn(jtpInner, Color3.fromRGB(15,35,110), UDim2.new(1,0,0,40))
     joinBtn.LayoutOrder = 4; Corner(joinBtn,10)
     Stroke(joinBtn, Color3.fromRGB(55,105,255), 2, 0.05)
-    local joinLbl = Label(joinBtn,"🚀  JOIN  ke Tower Map 2",15,
+    local joinLbl = Label(joinBtn,"[JOIN]  JOIN  ke Tower Map 2",15,
         Color3.fromRGB(148,195,255), Enum.Font.GothamBold, Enum.TextXAlignment.Center)
     joinLbl.Size = UDim2.new(1,0,1,0)
 
-    -- ── Helper: hapus semua row lama ─────────────────────────────────────
+    -- -- Helper: hapus semua row lama ------------------------------------?
     local function ClearRows()
         for _, r in ipairs(playerRows) do pcall(function() r:Destroy() end) end
         playerRows = {}
         JTP_selIdx = nil
     end
 
-    -- ── Helper: render daftar player ─────────────────────────────────────
+    -- -- Helper: render daftar player ------------------------------------?
     local function RenderList()
         ClearRows()
         listOuter.Visible = (#JTP_players > 0)
@@ -13239,7 +13242,7 @@ do
                         and Color3.fromRGB(18,52,32)
                         or  C.SURFACE
                 end
-                JTPStat("✔ Dipilih: "..entry.name.." (hostId = "..entry.userId..")",
+                JTPStat("[v] Dipilih: "..entry.name.." (hostId = "..entry.userId..")",
                     Color3.fromRGB(100,230,150))
             end)
 
@@ -13248,13 +13251,13 @@ do
         task.defer(ResizeJTPBody)
     end
 
-    -- ── SCAN logic : Players:GetPlayers() global — tidak filter mapId ─────
+    -- -- SCAN logic : Players:GetPlayers() global ? tidak filter mapId ----?
     local _jtpBusy = false
     scanBtn.MouseButton1Click:Connect(function()
         if _jtpBusy then return end
         _jtpBusy = true
-        scanLbl.Text = "⏳  Scanning..."
-        JTPStat("🔄 Mengambil daftar player di server...", C.YEL)
+        scanLbl.Text = "[...]  Scanning..."
+        JTPStat("[~] Mengambil daftar player di server...", C.YEL)
         listOuter.Visible = false
         JTP_selIdx = nil
         ClearRows()
@@ -13273,37 +13276,37 @@ do
 
             JTP_players = found
             _jtpBusy = false
-            scanLbl.Text = "🔍  SCAN  Player (Global Server)"
+            scanLbl.Text = "[SCAN]  SCAN  Player (Global Server)"
 
             if #found == 0 then
-                JTPStat("⚠️ Tidak ada player lain di server ini.", C.YEL)
+                JTPStat("[!] Tidak ada player lain di server ini.", C.YEL)
                 listOuter.Visible = false
                 task.defer(ResizeJTPBody)
             else
-                JTPStat("✅ "..#found.." player ditemukan. Pilih → JOIN.", Color3.fromRGB(100,230,150))
+                JTPStat("[OK] "..#found.." player ditemukan. Pilih -> JOIN.", Color3.fromRGB(100,230,150))
                 RenderList()
             end
         end)
     end)
 
-    -- ── JOIN logic ────────────────────────────────────────────────────────
+    -- -- JOIN logic --------------------------------------------------------
     -- Remote: LocalPlayerTeleport:FireServer({mapId=50301, hostId=UserId})
     joinBtn.MouseButton1Click:Connect(function()
         if JTP_joining then return end
         if not JTP_selIdx then
-            JTPStat("⚠️ Belum ada player yang dipilih!", C.YEL)
+            JTPStat("[!] Belum ada player yang dipilih!", C.YEL)
             return
         end
         local entry = JTP_players[JTP_selIdx]
         if not entry then
-            JTPStat("⚠️ Data tidak valid, coba SCAN ulang.", C.YEL)
+            JTPStat("[!] Data tidak valid, coba SCAN ulang.", C.YEL)
             return
         end
 
         JTP_joining = true
-        joinLbl.Text = "⏳  JOINING..."
+        joinLbl.Text = "[...]  JOINING..."
         joinLbl.TextColor3 = C.YEL
-        JTPStat("🚀 Menuju room "..entry.name.." (hostId="..entry.userId..")...", C.YEL)
+        JTPStat("[JOIN] Menuju room "..entry.name.." (hostId="..entry.userId..")...", C.YEL)
 
         task.spawn(function()
             local ok, err = pcall(function()
@@ -13315,39 +13318,39 @@ do
 
                 if not reLocalTp then error("Remote LocalPlayerTeleport tidak ditemukan!") end
 
-                -- ══ Step 1: LocalPlayerTeleport (sesuai SimpleSpy capture) ══
+                -- == Step 1: LocalPlayerTeleport (sesuai SimpleSpy capture) ==
                 -- args[1] = { mapId = 50301, hostId = UserId_target }
                 reLocalTp:FireServer({mapId = JTP_MAPID, hostId = entry.userId})
                 task.wait(0.35)
 
-                -- ══ Step 2: StartLocalPlayerTeleport ══
+                -- == Step 2: StartLocalPlayerTeleport ==
                 if reStartTp then
                     reStartTp:FireServer({mapId = JTP_MAPID, hostId = entry.userId})
                 end
                 task.wait(0.4)
 
-                -- ══ Step 3: EquipHeroWithData ══
+                -- == Step 3: EquipHeroWithData ==
                 if reEquip then
                     pcall(function() reEquip:FireServer() end)
                 end
                 task.wait(0.3)
 
-                -- ══ Step 4: LocalPlayerTeleportSuccess ══
+                -- == Step 4: LocalPlayerTeleportSuccess ==
                 if reTpSucc then
                     pcall(function() reTpSucc:InvokeServer() end)
                 end
             end)
 
             JTP_joining = false
-            joinLbl.Text = "🚀  JOIN  ke Tower Map 2"
+            joinLbl.Text = "[JOIN]  JOIN  ke Tower Map 2"
             joinLbl.TextColor3 = Color3.fromRGB(148,195,255)
 
             if ok then
-                JTPStat("✅ Berhasil join room "..entry.name.."!", Color3.fromRGB(80,220,140))
-                SystemNotify("✅ Joined Tower: "..entry.name, 4)
+                JTPStat("[OK] Berhasil join room "..entry.name.."!", Color3.fromRGB(80,220,140))
+                SystemNotify("[OK] Joined Tower: "..entry.name, 4)
             else
-                JTPStat("❌ Gagal: "..(tostring(err):sub(1,60)), Color3.fromRGB(220,80,80))
-                SystemNotify("❌ Join Tower gagal!", 3)
+                JTPStat("[ERR] Gagal: "..(tostring(err):sub(1,60)), Color3.fromRGB(220,80,80))
+                SystemNotify("[ERR] Join Tower gagal!", 3)
             end
         end)
     end)
@@ -13664,10 +13667,10 @@ end
 do
  local p = NewPanel("settings")
 
- -- ══════════════════════════════════════════════════════════════
+ -- ==============================================================
  -- GLOBAL SAVE / RESET CONFIG  (mencakup seluruh UI)
  -- File: FLa_GlobalConfig.json
- -- ══════════════════════════════════════════════════════════════
+ -- ==============================================================
  local GLOBAL_CFG_FILE = "FLa_GlobalConfig.json"
 
  local function GlobalSaveConfig()
@@ -13834,9 +13837,9 @@ do
   local ok, content = pcall(function() return readfile(GLOBAL_CFG_FILE) end)
   if not ok or not content or content == "" then return end
 
-  -- ══════════════════════════════════════════════════════
+  -- ======================================================
   -- FASE 1: Parse semua data dulu
-  -- ══════════════════════════════════════════════════════
+  -- ======================================================
   local mainBlock     = content:match('"main":%s*(%b{})') or ""
   local farmBlock     = content:match('"farm":%s*(%b{})') or ""
   local atkBlock      = content:match('"attack":%s*(%b{})') or ""
@@ -13913,10 +13916,10 @@ do
    transpPct  = tonumber(themeBlock:match('"transparency":(%d+)')) or 43
   end
 
-  -- ══════════════════════════════════════════════════════
+  -- ======================================================
   -- FASE 2: Restore VISUAL langsung (tanpa delay)
   -- Semua pill/toggle langsung ON sesuai config
-  -- ══════════════════════════════════════════════════════
+  -- ======================================================
   -- Main toggles
   pcall(function() if _visAutoHide    then _visAutoHide(autoHide)     end end)
   pcall(function() if _visDisableAnim then _visDisableAnim(disAnim)   end end)
@@ -13991,9 +13994,9 @@ do
   _gemMaxLevelState = gemLv
   _swSelectAllState = swSelAll
 
-  -- ══════════════════════════════════════════════════════
+  -- ======================================================
   -- FASE 3: Jalankan LOGIC (dengan delay biar game siap)
-  -- ══════════════════════════════════════════════════════
+  -- ======================================================
   task.delay(2, function()
    -- Main logic
    pcall(function() if autoHide  and STATE then STATE.autoHideReward = true; DoAutoHideReward(true) end end)
