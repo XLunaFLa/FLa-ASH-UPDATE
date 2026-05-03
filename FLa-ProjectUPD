@@ -8205,26 +8205,44 @@ function StartAscensionLoop()
     end
 
     -- Tunggu masuk map Ascension Tower (range 50301-50326)
+    -- [v52 FIX] FASE A: konfirmasi MapId masuk range Tower (max 20s)
+    -- FASE B: tunggu enemy spawn non-blocking (tidak menyebabkan rejoin)
     local _tpOk = false
     local _tpW  = 0
-    while not _tpOk and _tpW < 15 and ASC.running and not _cfail do
+    while not _tpOk and _tpW < 20 and ASC.running and not _cfail do
      task.wait(0.3); _tpW = _tpW + 0.3
      pcall(function()
       local wm = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId")
       if wm and wm >= 50301 and wm <= 50326 then _tpOk = true end
      end)
-     if not _tpOk and #GetRaidEnemies() > 0 then _tpOk = true end
+     if not _tpOk then
+      AscStatusUpdate("[~] Waiting Tower... (" .. string.format("%.0f", _tpW) .. "s/20s)", Color3.fromRGB(180,100,255))
+     end
     end
     if _cfConn then pcall(function() _cfConn:Disconnect() end) end
 
     if not _tpOk or _cfail then
-     RAID_LIVE[raidEntry.rawId] = nil
-     if raidEntry.rawId ~= raidEntry.id then RAID_LIVE[raidEntry.id] = nil end
-     if RebuildRaidList then pcall(RebuildRaidList) end
+     -- Gagal masuk Tower: JANGAN hapus dari RAID_LIVE, biarkan retry iterasi berikutnya
      ASC.inMap = false
-     ReleaseMapLock("asc") -- [v52 FIX]
-     AscStatusUpdate("Gagal masuk Tower - tunggu...", Color3.fromRGB(255,80,80))
-     task.wait(2); break
+     ReleaseMapLock("asc")
+     AscStatusUpdate("Gagal masuk Tower - retry...", Color3.fromRGB(255,80,80))
+     task.wait(3); break
+    end
+
+    -- FASE B: tunggu enemy spawn - non-blocking, timeout tidak menyebabkan skip
+    -- [v52 FIX] Deklarasikan _ascDone lebih awal agar bisa dipakai di loop ini
+    local _ascDone = false
+    local _ascSuccess = false
+    local connAS, connAF
+    local _reAS = Remotes:FindFirstChild("ChallengeRaidsSuccess")
+    local _reAF = Remotes:FindFirstChild("ChallengeRaidsFail")
+    if _reAS then connAS = _reAS.OnClientEvent:Connect(function() _ascDone = true; _ascSuccess = true end) end
+    if _reAF then connAF = _reAF.OnClientEvent:Connect(function() _ascDone = true end) end
+
+    local _ascEnemyWait = 0
+    while #GetRaidEnemies() == 0 and _ascEnemyWait < 15 and ASC.running and not _ascDone do
+     task.wait(0.3); _ascEnemyWait = _ascEnemyWait + 0.3
+     AscStatusUpdate("[~] Waiting Enemy... (" .. string.format("%.0f", _ascEnemyWait) .. "s/15s)", Color3.fromRGB(180,100,255))
     end
 
     -- STEP 4: Dalam map - equip hero
@@ -8250,14 +8268,8 @@ function StartAscensionLoop()
 
     AscStatusUpdate("[~] Dalam Tower "..mn.." - loading...", Color3.fromRGB(100,200,255))
 
-    -- [v48] SUCCESS/FAIL event listener (sama seperti RAID)
-    local _ascDone = false
-    local _ascSuccess = false
-    local connAS, connAF
-    local _reAS = Remotes:FindFirstChild("ChallengeRaidsSuccess")
-    local _reAF = Remotes:FindFirstChild("ChallengeRaidsFail")
-    if _reAS then connAS = _reAS.OnClientEvent:Connect(function() _ascDone = true; _ascSuccess = true end) end
-    if _reAF then connAF = _reAF.OnClientEvent:Connect(function() _ascDone = true end) end
+    -- [v52 FIX] _ascDone, _ascSuccess, connAS, connAF sudah dideklarasikan di atas (sebelum enemy wait loop)
+    -- Tidak perlu deklarasi ulang di sini
 
     -- [v48] AUTO BOSS KILL - sama persis dengan AUTO RAID
     if ASC.autoKillBoss then
@@ -9577,41 +9589,44 @@ local function ResolveEntry()
                             task.wait(1); break
                         end
                     end
- -- STEP 3: Tunggu masuk map (max 10s)
- -- 
- RaidStatusUpdate("[~] Waiting...", Color3.fromRGB(180,100,255))
- local _tpOk = false
+ -- STEP 3: Tunggu masuk map
+ -- [v52 FIX] Pisah dua fase:
+ -- FASE A (max 20s): tunggu workspace.MapId masuk range raid (50101-50120)
+ --   Jika gagal = TP server tidak jalan, retry iterasi (JANGAN hapus raidEntry).
+ -- FASE B (max 15s): tunggu enemy spawn - TIDAK menyebabkan skip/rejoin.
+ --   Boss scan di STEP 4 sudah punya loop 30s yang handle enemy lambat spawn.
+ RaidStatusUpdate("[~] Waiting Map...", Color3.fromRGB(180,100,255))
  local _mapIdOk = false
  local _tpWait = 0
- -- [FIX] Dua kondisi WAJIB sebelum lanjut:
- -- 1. workspace.MapId sudah masuk range raid (50101-50120)
- -- 2. Ada enemy yang sudah spawn di workspace (GetRaidEnemies > 0)
- -- Mencegah TP ke boss saat map masih loading dan enemy belum ada
- while not _tpOk and _tpWait < 15 and RAID.running do
+ while not _mapIdOk and _tpWait < 20 and RAID.running do
   task.wait(0.3); _tpWait = _tpWait + 0.3
   pcall(function()
    local wMapId = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
-   if wMapId then
-    if RAID.serverMapId and wMapId == RAID.serverMapId then
-     _mapIdOk = true
-    elseif RAID.runeEnabled then
-     local ok = (wMapId >= 50101 and wMapId <= 50120)
-     if ok then RAID.serverMapId = wMapId; _mapIdOk = true end
-    elseif (wMapId >= 50101 and wMapId <= 50120) then
-     _mapIdOk = true
-    end
+   if not wMapId then return end
+   if RAID.serverMapId and wMapId == RAID.serverMapId then
+    _mapIdOk = true
+   elseif (wMapId >= 50101 and wMapId <= 50120) then
+    if not RAID.serverMapId then RAID.serverMapId = wMapId end
+    _mapIdOk = true
    end
   end)
-  local _enemyReady = #GetRaidEnemies() > 0
-  if _mapIdOk and _enemyReady then _tpOk = true end
-  -- Fallback: enemy sudah ada tapi MapId belum update setelah 3s
-  if not _mapIdOk and _enemyReady and _tpWait >= 3 then _tpOk = true end
+  if not _mapIdOk then
+   RaidStatusUpdate("[~] Waiting Map... (" .. string.format("%.0f", _tpWait) .. "s/20s)", Color3.fromRGB(180,100,255))
+  end
  end
 
- if not _tpOk and RAID.running then
- RAID_LIVE[RAID.raidId] = nil; RebuildRaidList()
- _raidInterrupt = false; RAID.inMap = false; MODE:Release("raid"); RAID.fromMapId = nil; MODE:Release("raid")
- task.wait(1); break
+ if not _mapIdOk and RAID.running then
+  RaidStatusUpdate("[!] Gagal masuk map (timeout 20s) - retry...", Color3.fromRGB(255,100,60))
+  _raidInterrupt = false; RAID.inMap = false; ReleaseMapLock("raid"); MODE:Release("raid"); RAID.fromMapId = nil
+  task.wait(3); break
+ end
+
+ -- FASE B: tunggu enemy spawn (non-blocking, timeout tidak skip)
+ RaidStatusUpdate("[~] Waiting Enemy...", Color3.fromRGB(180,100,255))
+ local _enemyWait = 0
+ while #GetRaidEnemies() == 0 and _enemyWait < 15 and RAID.running do
+  task.wait(0.3); _enemyWait = _enemyWait + 0.3
+  RaidStatusUpdate("[~] Waiting Enemy... (" .. string.format("%.0f", _enemyWait) .. "s/15s)", Color3.fromRGB(180,100,255))
  end
 
  -- [FIX] Equip hero ke map ini agar hero spawn di sebelah player
@@ -10194,7 +10209,8 @@ local function ResolveEntry()
                 -- Jika aman, baru boleh cari Raid
                 -- Cek IsRaidLiveInGame DULU sebelum ResolveEntry
                 if IsRaidLiveInGame() then
-                    if ResolveEntry and ResolveEntry() then break end
+                    local _newEntry = ResolveEntry and ResolveEntry()
+                    if _newEntry then raidEntry = _newEntry; break end
                     RaidStatusUpdate("[FLa] Waiting grade filter... (" .. _fw .. "s)", Color3.fromRGB(200,255,150))
                 else
                     RaidStatusUpdate("[FLa] Empty RAID - Waiting... (" .. _fw .. "s)", Color3.fromRGB(160,120,60))
