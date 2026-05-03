@@ -1355,6 +1355,41 @@ end
 -- [GUARD SYSTEM v50] Helper global: cek apakah ada fitur lain sedang di dalam map
 -- Dipakai oleh SEMUA fitur sebelum join map apapun
 -- ============================================================
+
+-- [v52 FIX] Atomic map-enter lock untuk cegah race condition RAID vs ASC
+-- Ketika dua fitur lolos guard bersamaan (keduanya lihat inMap=false),
+-- hanya yang pertama klaim lock ini yang boleh masuk map.
+-- Format: nil = bebas, "raid" / "asc" / "siege" / "dungeon" = sedang diklaim
+_MAP_ENTER_LOCK = nil
+_MAP_ENTER_LOCK_TIME = 0
+
+-- Coba klaim lock. Return true jika berhasil (boleh lanjut masuk map).
+-- featureName: "raid" | "asc" | "siege" | "dungeon"
+-- Timeout 30 detik: jika lock pemilik sebelumnya tidak release > 30s, paksa reset.
+function TryClaimMapLock(featureName)
+ local now = os.clock()
+ if _MAP_ENTER_LOCK == nil or _MAP_ENTER_LOCK == featureName then
+  _MAP_ENTER_LOCK = featureName
+  _MAP_ENTER_LOCK_TIME = now
+  return true
+ end
+ -- Cek timeout: jika pemilik lock sudah > 30 detik tidak release, paksa ambil
+ if (now - _MAP_ENTER_LOCK_TIME) > 30 then
+  _MAP_ENTER_LOCK = featureName
+  _MAP_ENTER_LOCK_TIME = now
+  return true
+ end
+ return false
+end
+
+-- Release lock (panggil setelah inMap=false di-set atau setelah keluar map)
+function ReleaseMapLock(featureName)
+ if _MAP_ENTER_LOCK == featureName then
+  _MAP_ENTER_LOCK = nil
+  _MAP_ENTER_LOCK_TIME = 0
+ end
+end
+
 function IsAnyMapActive()
  -- Cek semua state inMap secara independen (tidak rely on MODE.current)
  if RAID and RAID.inMap then return true, "raid" end
@@ -1363,6 +1398,8 @@ function IsAnyMapActive()
  if DUNGEON and DUNGEON.inMap then return true, "dungeon" end
  if DUNGEON and DUNGEON.interrupt then return true, "dungeon" end
  if ST2 and ST2.inMap then return true, "st2" end
+ -- [v52 FIX] Cek juga atomic lock - fitur lain sedang dalam proses masuk map
+ if _MAP_ENTER_LOCK ~= nil then return true, _MAP_ENTER_LOCK end
  return false, nil
 end
 
@@ -7744,6 +7781,7 @@ function StopRaid()
  MODE:Release("raid") -- [v252]
  RAID.running = false
  RAID.inMap = false
+ ReleaseMapLock("raid") -- [v52 FIX] pastikan lock terlepas saat stop paksa
  if RAID.thread then
  pcall(function() task.cancel(RAID.thread) end)
  RAID.thread = nil
@@ -7802,6 +7840,7 @@ end
 function StopAscension()
  ASC.running = false
  ASC.inMap   = false
+ ReleaseMapLock("asc") -- [v52 FIX] pastikan lock terlepas saat stop paksa
  if ASC.thread then
   pcall(function() task.cancel(ASC.thread) end)
   ASC.thread = nil
@@ -8113,11 +8152,26 @@ function StartAscensionLoop()
      if not ASC.running then break end
     end
 
+    -- [v52 FIX] Atomic lock: cegah RAID masuk bersamaan saat ASC baru lolos guard
+    -- Tanpa lock ini: RAID dan ASC bisa lolos guard hampir bersamaan (keduanya lihat inMap=false)
+    -- lalu keduanya coba TP player ke map berbeda dalam waktu bersamaan
+    do
+     local _lockWait = 0
+     while ASC.running and _lockWait < 15 do
+      if TryClaimMapLock("asc") then break end
+      AscStatusUpdate("[||] Tunggu slot masuk map bebas...", Color3.fromRGB(200,160,255))
+      task.wait(0.2); _lockWait = _lockWait + 0.2
+     end
+     if not ASC.running then ReleaseMapLock("asc"); break end
+    end
+
     local mn = raidEntry.mapNum
     local bossHint = raidEntry.bossName and (" - "..raidEntry.bossName) or ""
     AscStatusUpdate("Masuk: Tower "..mn..bossHint.." ["..raidEntry.grade.."]", Color3.fromRGB(100,200,255))
 
     ASC.inMap = true
+    -- [v52 FIX] Setelah inMap=true di-set, lock tidak diperlukan lagi (IsAnyMapActive sudah cover)
+    ReleaseMapLock("asc")
 
     -- Resolve targetMapId Ascension Tower dari nama boss (chat parser)
     local targetMapId = ResolveAscTargetMapId(raidEntry.bossName)
@@ -8128,7 +8182,7 @@ function StartAscensionLoop()
      pcall(function() RE.CreateRaidTeam:InvokeServer(raidEntry.id) end)
     end
     task.wait(0.3)
-    if not ASC.running then ASC.inMap = false; break end
+    if not ASC.running then ASC.inMap = false; ReleaseMapLock("asc"); break end
 
     -- STEP 2: StartChallengeRaidMap (TANPA argumen - confirmed SimpleSPY)
     local _cfail = false
@@ -8142,7 +8196,7 @@ function StartAscensionLoop()
     task.wait(0.3)
     if not ASC.running then
      if _cfConn then pcall(function() _cfConn:Disconnect() end) end
-     ASC.inMap = false; break
+     ASC.inMap = false; ReleaseMapLock("asc"); break
     end
 
     -- STEP 3: StartLocalPlayerTeleport({hostId=LP.UserId, mapId=50301-50326})
@@ -8168,6 +8222,7 @@ function StartAscensionLoop()
      if raidEntry.rawId ~= raidEntry.id then RAID_LIVE[raidEntry.id] = nil end
      if RebuildRaidList then pcall(RebuildRaidList) end
      ASC.inMap = false
+     ReleaseMapLock("asc") -- [v52 FIX]
      AscStatusUpdate("Gagal masuk Tower - tunggu...", Color3.fromRGB(255,80,80))
      task.wait(2); break
     end
@@ -8587,9 +8642,7 @@ function StartAscensionLoop()
     end
 
     ASC.inMap = false
-
-    -- [v48] STEP 6: Cooldown 14s (sama persis dengan RAID, scan tetap jalan)
-    for cd = 14, 1, -1 do
+    ReleaseMapLock("asc") -- [v52 FIX] Pastikan lock selalu dilepas saat keluar map
      if not ASC.running then break end
      AscStatusUpdate("[..] Cooldown "..cd.."s...", Color3.fromRGB(160,148,135))
      if ASC.dot then ASC.dot.BackgroundColor3 = Color3.fromRGB(255,200,60) end
@@ -9294,7 +9347,7 @@ local function ResolveEntry()
  end
 
  if not _preCheck_ok then
- _raidInterrupt = false; RAID.inMap = false; MODE:Release("raid")
+ _raidInterrupt = false; RAID.inMap = false; ReleaseMapLock("raid"); MODE:Release("raid")
  RaidStatusUpdate("Raid expired sebelum masuk - tunggu raid baru...", Color3.fromRGB(255,100,60))
  task.wait(2)
  break
@@ -9339,6 +9392,19 @@ local function ResolveEntry()
 
  -- Siege cek tetap pakai flag lama (siege sudah pakai MODE juga via alias)
  _raidInterrupt = true -- sync flag lama
+
+ -- [v52 FIX] Atomic lock: cegah ASC masuk bersamaan saat RAID baru lolos guard
+ -- Tanpa lock ini: RAID dan ASC bisa lolos guard hampir bersamaan karena Lua coroutine
+ -- yield di task.wait(), sehingga keduanya lihat inMap=false dan keduanya lanjut
+ do
+  local _rLockWait = 0
+  while RAID.running and _rLockWait < 15 do
+   if TryClaimMapLock("raid") then break end
+   RaidStatusUpdate("[||] Tunggu slot masuk map bebas...", Color3.fromRGB(200,200,100))
+   task.wait(0.2); _rLockWait = _rLockWait + 0.2
+  end
+  if not RAID.running then ReleaseMapLock("raid"); break end
+ end
  
 -- [v262 FIX] JANGAN set inMap=true dulu sebelum raidMapId di-assign
                     -- [FIX Ascension] raidEntry.id negatif = Ascension entry (chat-only id)
@@ -9357,6 +9423,7 @@ local function ResolveEntry()
                     RAID.raidId = _resolvedRaidId
                     RAID.raidMapId = raidEntry.mapId
                     RAID.inMap = true
+                    ReleaseMapLock("raid") -- [v52 FIX] inMap=true sudah di-set, IsAnyMapActive sudah cover
                     if RAID.updateActiveLabel then pcall(RAID.updateActiveLabel) end
 
                     if MA.running then
