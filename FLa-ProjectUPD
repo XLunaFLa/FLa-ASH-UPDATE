@@ -8226,16 +8226,39 @@ function StartAscensionLoop()
       return IsBossAsc(name)
      end
 
-     -- [GUARD v50] Early boss detection ASC - fallback ke GetEnemiesLocal()
+     -- [FIX v50] Early boss detection ASC - scan agresif semua sumber
      local _earlyBoss = nil
      local _loadWait = 0
-     while _loadWait < 8 and ASC.running and not _ascDone do
+     while _loadWait < 10 and ASC.running and not _ascDone do
       task.wait(0.5); _loadWait = _loadWait + 0.5
       if _loadWait >= 1 and not _earlyBoss then
+       -- Sumber 1: GetRaidEnemies()
        local _eList = GetRaidEnemies()
+       -- Sumber 2: fallback GetEnemiesLocal() kalau kosong
        if #_eList == 0 then _eList = GetEnemiesLocal() end
        for _, e in ipairs(_eList) do
         if IsBossAscWithHint(e.model.Name) then _earlyBoss = e; break end
+       end
+       -- Sumber 3: scan folder langsung kalau masih belum ketemu
+       if not _earlyBoss then
+        pcall(function()
+         for _, fname in ipairs({"Bosses","Boss","RaidBoss","Enemys","Enemy","Enemies","RaidEnemys","Monsters","Monster"}) do
+          local f = workspace:FindFirstChild(fname)
+          if f then
+           for _, obj in ipairs(f:GetChildren()) do
+            if obj:IsA("Model") and IsBossAscWithHint(obj.Name) then
+             local g = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid") or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
+             local hrp = obj:FindFirstChild("HumanoidRootPart")
+             local hum = obj:FindFirstChildOfClass("Humanoid")
+             if g and hrp and hum and hum.Health > 0 then
+              _earlyBoss = {guid=g, hrp=hrp, model=obj}; break
+             end
+            end
+           end
+          end
+          if _earlyBoss then break end
+         end
+        end)
        end
       end
       if _earlyBoss then
@@ -8245,9 +8268,11 @@ function StartAscensionLoop()
       end
      end
 
-     -- [v48] Event-based boss detection (sama dengan RAID)
+     -- [FIX v50] Event-based boss detection - identik dengan RAID
+     -- Tambah _bossFoundViaEvent flag + scan existing children tiap folder
      local boss = (_earlyBoss and IsBossAscWithHint(_earlyBoss.model.Name)) and _earlyBoss or nil
      local _bossEventConns = {}
+     local _bossFoundViaEvent = false
      local function _tryAddBoss(obj)
       if boss or not obj:IsA("Model") then return end
       if IsBossAscWithHint(obj.Name) then
@@ -8256,15 +8281,20 @@ function StartAscensionLoop()
        local hum = obj:FindFirstChildOfClass("Humanoid")
        if g and hrp and hum and hum.Health > 0 then
         boss = {guid=g, hrp=hrp, model=obj}
+        _bossFoundViaEvent = true
        end
       end
      end
-     for _, fname in ipairs({"Bosses","Boss","RaidBoss","Enemys","Enemy","Enemies","RaidEnemys","Monsters"}) do
+     -- Pasang ChildAdded di semua folder enemy + scan existing children sekarang
+     for _, fname in ipairs({"Bosses","Boss","RaidBoss","Enemys","Enemy","Enemies","RaidEnemys","Monsters","Monster"}) do
       local folder = workspace:FindFirstChild(fname)
       if folder then
        table.insert(_bossEventConns, folder.ChildAdded:Connect(_tryAddBoss))
+       -- [FIX] Scan existing children - boss mungkin sudah ada sebelum listener dipasang
+       for _, child in ipairs(folder:GetChildren()) do _tryAddBoss(child) end
       end
      end
+     -- Listen workspace.ChildAdded untuk folder yang baru muncul
      table.insert(_bossEventConns, workspace.ChildAdded:Connect(function(obj)
       if obj:IsA("Folder") or obj:IsA("Model") then
        _tryAddBoss(obj)
@@ -8275,14 +8305,34 @@ function StartAscensionLoop()
       end
      end))
 
-     -- Cari boss (max 30s, sama dengan RAID)
+     -- [FIX v50] Cari boss - max 40s (Tower butuh lebih lama dari RAID)
+     -- Pakai GetRaidEnemies() + fallback GetEnemiesLocal() tiap iterasi
      local waitBoss = 0
-     while ASC.running and not boss and waitBoss < 30 and not _ascDone do
-      for _, e in ipairs(GetRaidEnemies()) do
+     while ASC.running and not boss and waitBoss < 40 and not _ascDone do
+      -- Coba GetRaidEnemies() dulu
+      local _bList = GetRaidEnemies()
+      -- Fallback: kalau kosong (mapId belum update), pakai GetEnemiesLocal()
+      if #_bList == 0 then _bList = GetEnemiesLocal() end
+      for _, e in ipairs(_bList) do
        if IsBossAscWithHint(e.model.Name) then boss = e; break end
       end
+      -- Fallback terakhir: scan workspace:GetDescendants() setelah 15s
+      if not boss and waitBoss >= 15 and waitBoss % 5 < 0.4 then
+       pcall(function()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+         if obj:IsA("Model") and IsBossAscWithHint(obj.Name) then
+          local g = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid") or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
+          local hrp = obj:FindFirstChild("HumanoidRootPart")
+          local hum = obj:FindFirstChildOfClass("Humanoid")
+          if g and hrp and hum and hum.Health > 0 then
+           boss = {guid=g, hrp=hrp, model=obj}; break
+          end
+         end
+        end
+       end)
+      end
       if not boss then
-       AscStatusUpdate("Find Boss... ("..math.floor(waitBoss).."s/30s)", Color3.fromRGB(160,148,135))
+       AscStatusUpdate("Find Boss... ("..math.floor(waitBoss).."s/40s)", Color3.fromRGB(160,148,135))
        task.wait(0.3); waitBoss = waitBoss + 0.3
       end
      end
