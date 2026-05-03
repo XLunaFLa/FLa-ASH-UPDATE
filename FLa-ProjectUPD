@@ -6850,8 +6850,8 @@ function ParseChatLine(text)
  label = "Ascension Tower "..mapNum..(_ascBossName and (" - "..(_ascBossName:gsub("^%l",string.upper))) or "").." ["..grade.."]",
  }
  if RebuildRaidList then pcall(RebuildRaidList) end
- -- [v46] Wakeup Auto Ascension loop jika sedang menunggu
- if _ascWakeup then pcall(function() _ascWakeup:Fire() end) end
+ -- [v58] Jangan langsung fire _ascWakeup di sini - TriggerEntryWakeup() di bawah
+ -- yang akan menangani ini setelah debounce 3 detik
  else
  -- Update isAscension = false untuk entry normal di RAID_LIVE
  for rid, entry in pairs(RAID_LIVE) do
@@ -6862,7 +6862,9 @@ function ParseChatLine(text)
  end
 
  if not _whSilent then TriggerWebhookDebounce() end
- if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
+ -- [v58] Gunakan debounce terpusat: tunggu 3 detik setelah notif terakhir
+ -- baru bangunkan RAID dan ASC bersamaan untuk filter dan masuk
+ TriggerEntryWakeup()
  end
  return
  end
@@ -7254,6 +7256,46 @@ end
 
 SendWebhookNotif = TriggerWebhookDebounce -- alias untuk kompatibilitas
 
+-- ============================================================
+-- [v58] ENTRY WAKEUP DEBOUNCE - Gerbang masuk terpusat
+-- ============================================================
+-- Semua sumber notif (chat parser, workspace watcher, UpdateRaidInfo server)
+-- wajib memanggil TriggerEntryWakeup() dan TIDAK boleh langsung fire wakeup.
+--
+-- Cara kerja:
+--   1. Notif masuk -> data langsung masuk RAID_LIVE (seperti biasa)
+--   2. TriggerEntryWakeup() dipanggil -> timer di-reset ke 3 detik
+--   3. Selama 3 detik: notif-notif berikutnya terus update data, timer terus di-reset
+--   4. Setelah 3 detik tidak ada notif baru -> BARU fire wakeup ke RAID dan ASC
+--   5. RAID dan ASC masing-masing cek filter mereka sendiri dan masuk jika cocok
+--   6. Karena keduanya dibangunkan dari titik yang SAMA setelah data stabil,
+--      tidak ada race condition - siapa yang resolve entry lebih dulu itulah yang masuk
+--
+-- Keuntungan vs v57:
+--   - Tidak perlu _ascPending flag
+--   - Tidak ada pembedaan "ini notif ASC, jangan bangunkan RAID" yang rapuh
+--   - Lebih toleran terhadap notif terlambat / out-of-order dari server
+--   - Tetap ada TryClaimMapLock sebagai safety net terakhir
+
+local _entryWakeupTimer = nil  -- handle task.delay aktif
+local _ENTRY_DEBOUNCE_SEC = 3  -- detik tunggu setelah notif terakhir
+
+TriggerEntryWakeup = function()
+    -- Reset timer: kalau sudah ada timer berjalan, batalkan dan mulai lagi
+    if _entryWakeupTimer then
+        pcall(function() task.cancel(_entryWakeupTimer) end)
+        _entryWakeupTimer = nil
+    end
+    _entryWakeupTimer = task.delay(_ENTRY_DEBOUNCE_SEC, function()
+        _entryWakeupTimer = nil
+        -- Data sudah stabil selama 3 detik. Bangunkan RAID dan ASC bersamaan.
+        -- Masing-masing akan resolve entry mereka sendiri dan filter sesuai setting user.
+        -- TryClaimMapLock menjamin hanya satu yang bisa masuk map dalam satu waktu.
+        if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
+        if _ascWakeup  then pcall(function() _ascWakeup:Fire()  end) end
+    end)
+end
+-- ============================================================
 FlushWebhookPending = function()
  _whLastSent = 0 -- reset cooldown
  TriggerWebhookDebounce()
@@ -7512,8 +7554,9 @@ local function _onRaidChildAdded(child, slotName)
    or ("Map ".._mn.." - "..(MAP_NAMES[_mn] or "Map ".._mn).." [?]"),
  }
  RebuildRaidList()
- if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
- if _prevIsAsc and _ascWakeup then pcall(function() _ascWakeup:Fire() end) end
+ -- [v58] Gunakan debounce terpusat: jangan langsung bangunkan siapapun
+ -- TriggerEntryWakeup() akan tunggu 3 detik setelah notif terakhir baru fire RAID & ASC
+ if TriggerEntryWakeup then TriggerEntryWakeup() end
  -- [v271] Trigger webhook LANGSUNG saat raid muncul di workspace
  if not _whSilent then
   task.spawn(function()
@@ -7563,7 +7606,8 @@ local function _watchRaidSlot(reFolder)
  local prev = _runeGradeCache[mn]
  if not prev or prev == "?" then
  _runeGradeCache[mn] = grade:upper()
- if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
+ -- [v58] Gunakan debounce terpusat
+ if TriggerEntryWakeup then TriggerEntryWakeup() end
  end
  end
  end
@@ -7578,7 +7622,8 @@ local function _watchRaidSlot(reFolder)
  local prev2 = _runeGradeCache[mn2]
  if not prev2 or prev2 == "?" then
  _runeGradeCache[mn2] = g2:upper()
- if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
+ -- [v58] Gunakan debounce terpusat
+ if TriggerEntryWakeup then TriggerEntryWakeup() end
  end
  end
  end
@@ -7710,7 +7755,8 @@ ConnectRaidListeners = function()
  until true
  end
  RebuildRaidList()
- if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
+ -- [v58] Gunakan debounce terpusat
+ if TriggerEntryWakeup then TriggerEntryWakeup() end
  TriggerWebhookDebounce()
  end
  end)
@@ -8168,6 +8214,7 @@ function StartAscensionLoop()
     AscStatusUpdate("Masuk: Tower "..mn..bossHint.." ["..raidEntry.grade.."]", Color3.fromRGB(100,200,255))
 
     ASC.inMap = true
+    _ascPending = false -- [v57 FIX] inMap=true sudah cover, tidak perlu pending lagi
     -- [v56 FIX] _ascDominatedThisEvent dihapus - RAID dan ASC sekarang independen
     -- [v52 FIX] Setelah inMap=true di-set, lock tidak diperlukan lagi (IsAnyMapActive sudah cover)
     ReleaseMapLock("asc")
@@ -9005,7 +9052,8 @@ local function ForceRescanRaidEnter()
         -- 3. Jika ada perubahan, refresh UI dan lapor ke bot
         if newFound then
             RebuildRaidList()
-            if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
+            -- [v58] Gunakan debounce terpusat
+            if TriggerEntryWakeup then TriggerEntryWakeup() end
             if not _whSilent and TriggerWebhookDebounce then TriggerWebhookDebounce() end
         end
     end)
