@@ -8643,6 +8643,9 @@ function StartAscensionLoop()
 
     ASC.inMap = false
     ReleaseMapLock("asc") -- [v52 FIX] Pastikan lock selalu dilepas saat keluar map
+
+    -- [v48] STEP 6: Cooldown 14s (sama persis dengan RAID, scan tetap jalan)
+    for cd = 14, 1, -1 do
      if not ASC.running then break end
      AscStatusUpdate("[..] Cooldown "..cd.."s...", Color3.fromRGB(160,148,135))
      if ASC.dot then ASC.dot.BackgroundColor3 = Color3.fromRGB(255,200,60) end
