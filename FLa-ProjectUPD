@@ -1300,8 +1300,11 @@ _setGemLevelSlider = nil -- Main: Gem Level slider setter
 -- [v252] MODE DISPATCHER - Single source of truth
 -- ============================================================
 MODE = {
- current = "idle", -- "idle"|"ma"|"raid"|"siege"|"dungeon"
- priority = { dungeon=4, siege=3, raid=2, ma=1, idle=0 },
+ current = "idle", -- "idle"|"ma"|"raid"|"siege"|"dungeon"|"asc"|"st2"
+ -- PRIORITY: dungeon > siege > raid > asc > st2 > ma > idle
+ -- Fitur HANYA boleh masuk jika MODE.current == "idle"
+ -- (tidak ada override priority — setiap fitur harus tunggu giliran)
+ priority = { dungeon=6, siege=5, raid=4, asc=3, st2=2, ma=1, idle=0 },
  _prev = {}, -- stack: simpan mode yang diinterrupt, untuk resume
 }
 
@@ -1347,6 +1350,76 @@ end
 
 --  Alias getter (baca-saja) 
 -- ============================================================
+
+-- ============================================================
+-- [GUARD SYSTEM v50] Helper global: cek apakah ada fitur lain sedang di dalam map
+-- Dipakai oleh SEMUA fitur sebelum join map apapun
+-- ============================================================
+function IsAnyMapActive()
+ -- Cek semua state inMap secara independen (tidak rely on MODE.current)
+ if RAID and RAID.inMap then return true, "raid" end
+ if ASC and ASC.inMap then return true, "asc" end
+ if SIEGE and SIEGE.inMap then return true, "siege" end
+ if DUNGEON and DUNGEON.inMap then return true, "dungeon" end
+ if DUNGEON and DUNGEON.interrupt then return true, "dungeon" end
+ if ST2 and ST2.inMap then return true, "st2" end
+ return false, nil
+end
+
+-- Tunggu sampai tidak ada fitur lain di dalam map (timeout detik)
+-- featureName: nama fitur yang lagi nunggu (untuk log)
+function WaitUntilIdle(featureName, timeout)
+ local t = 0
+ local limit = timeout or 60
+ while t < limit do
+  local active, who = IsAnyMapActive()
+  if not active then return true end
+  task.wait(0.5); t = t + 0.5
+ end
+ return false
+end
+
+-- ============================================================
+-- [GUARD SYSTEM v50] GetEnemiesLocal(folder_hint)
+-- Setiap fitur baca musuh SENDIRI dari workspace.Enemys
+-- Tidak ada shared state antar fitur
+-- ============================================================
+local ENEMY_FOLDERS_ALL = {"Enemys","EnemyCityRaid","CityRaidEnemys","Enemies","Enemy"}
+function GetEnemiesLocal()
+ local list = {}
+ local seen = {}
+ for _, fname in ipairs(ENEMY_FOLDERS_ALL) do
+  local f = workspace:FindFirstChild(fname)
+  if f then
+   for _, e in ipairs(f:GetChildren()) do
+    if e:IsA("Model") then
+     local g = e:GetAttribute("EnemyGuid") or e:GetAttribute("BossGuid") or e:GetAttribute("Guid") or e:GetAttribute("GUID")
+     local h = e:FindFirstChild("HumanoidRootPart")
+     local hum = e:FindFirstChildOfClass("Humanoid")
+     if g and h and hum and hum.Health > 0 and not seen[g] then
+      seen[g] = true
+      table.insert(list, {model=e, guid=g, hrp=h})
+     end
+    end
+   end
+  end
+ end
+ -- Fallback: scan workspace langsung kalau folder kosong
+ if #list == 0 then
+  for _, obj in ipairs(workspace:GetChildren()) do
+   if obj:IsA("Model") then
+    local g = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid") or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
+    local h = obj:FindFirstChild("HumanoidRootPart")
+    local hum = obj:FindFirstChildOfClass("Humanoid")
+    if g and h and hum and hum.Health > 0 and not seen[g] then
+     seen[g] = true
+     table.insert(list, {model=obj, guid=g, hrp=h})
+    end
+   end
+  end
+ end
+ return list
+end
 
 _raidInterrupt = false -- true saat raid muncul & Mass Attack harus pause
 local _lastBossGuid = nil -- guid boss terakhir untuk ExtraReward auto-claim
@@ -1840,8 +1913,12 @@ function AttackLoop_Mass(onStatus)
  local STUCK_LIMIT = 5.0 -- detik tanpa kill baru -> skip map
 
  while MA.running do
-  -- Cek interrupt prioritas lebih tinggi
-  -- [FIX] Pause jika fitur prioritas lebih tinggi aktif
+  -- [GUARD v50] Cek IsAnyMapActive() langsung dari state terpusat
+  do
+   local _mBusy, _mWho = IsAnyMapActive()
+   if _mBusy then return "interrupted" end
+  end
+  -- Cek interrupt prioritas lebih tinggi (kompatibilitas flag lama)
   if MODE.current ~= "idle" and MODE.current ~= "ma"
    or _raidInterrupt or _siegeInterrupt
    or (DUNGEON and DUNGEON.interrupt) or (DUNGEON and DUNGEON.inMap)
@@ -8018,13 +8095,16 @@ function StartAscensionLoop()
     if not ASC.running then break end
     if not raidEntry then break end
 
-    -- [BUG FIX v49] Tambah guard: jika RAID.inMap masih true, tunggu dulu sebelum ASC masuk
-    -- Ini mencegah tabrakan di mana ASC teleport ke Tower sementara RAID masih di dalam map raid
-    if RAID.inMap then
-     AscStatusUpdate("[||] Menunggu Auto Raid selesai dulu...", Color3.fromRGB(255,140,0))
-     local _waitRaidDone = 0
-     while RAID.inMap and ASC.running and _waitRaidDone < 30 do
-      task.wait(0.5); _waitRaidDone = _waitRaidDone + 0.5
+    -- [GUARD v50] ASC tunggu SEMUA fitur lain selesai sebelum masuk Tower
+    -- Tidak hanya RAID - tapi juga SIEGE, DUNGEON, ST2
+    do
+     local _aWait = 0
+     while ASC.running and _aWait < 90 do
+      local _busy, _who = IsAnyMapActive()
+      local _selfBusy = (_who == "asc")
+      if not _busy or _selfBusy then break end
+      AscStatusUpdate("[||] Tunggu "..(_who or "?").." selesai dulu...", Color3.fromRGB(255,140,0))
+      task.wait(0.5); _aWait = _aWait + 0.5
      end
      if not ASC.running then break end
     end
@@ -8146,13 +8226,15 @@ function StartAscensionLoop()
       return IsBossAsc(name)
      end
 
-     -- Early boss detection selama loading
+     -- [GUARD v50] Early boss detection ASC - fallback ke GetEnemiesLocal()
      local _earlyBoss = nil
      local _loadWait = 0
      while _loadWait < 8 and ASC.running and not _ascDone do
       task.wait(0.5); _loadWait = _loadWait + 0.5
       if _loadWait >= 1 and not _earlyBoss then
-       for _, e in ipairs(GetRaidEnemies()) do
+       local _eList = GetRaidEnemies()
+       if #_eList == 0 then _eList = GetEnemiesLocal() end
+       for _, e in ipairs(_eList) do
         if IsBossAscWithHint(e.model.Name) then _earlyBoss = e; break end
        end
       end
@@ -8849,51 +8931,19 @@ function StartRaidLoop()
  task.wait(0.1)
  end
 
- -- [FIX v46] Cek Ascension Mode sedang di dalam map - pause Auto Raid
- if ASC.inMap then
- RAID.inMap = false
- RaidStatusUpdate("[||] Ascension Tower aktif - Auto Raid pause...", Color3.fromRGB(180,100,255))
- while ASC.inMap and RAID.running do
-  task.wait(0.5)
- end
- if not RAID.running then break end
- RaidStatusUpdate("> Ascension selesai - lanjut raid...", C.ACC3)
- task.wait(0.1)
- end
-
- -- [FIX v46] Fallback logic: jika Ascension Mode aktif DAN ada Ascension Tower tersedia,
- -- Auto Raid mengalah dan menunggu Ascension Mode selesai menangani Tower.
- -- Auto Raid hanya jalan jika: Ascension Mode OFF, atau Ascension Mode ON tapi tidak ada Tower.
- if ASC.running and #GetAscensionList() > 0 then
- RAID.inMap = false
- RaidStatusUpdate("[||] Ascension Tower tersedia - menunggu Ascension Mode...", Color3.fromRGB(180,100,255))
- while ASC.running and #GetAscensionList() > 0 and RAID.running do
-  task.wait(1)
- end
- if not RAID.running then break end
- RaidStatusUpdate("> Tidak ada Ascension Tower - Auto Raid ambil alih...", C.ACC3)
- task.wait(0.1)
- end
- -- [BUG FIX v49] Double-check: setelah keluar dari wait loop ASC, pastikan ASC.inMap benar-benar false
- -- Ada window race: GetAscensionList kosong tapi ASC sudah set inMap=true (proses join Tower baru mulai)
- if ASC.inMap then
-  RAID.inMap = false
-  RaidStatusUpdate("[||] Ascension sedang join Tower - tunggu...", Color3.fromRGB(180,100,255))
-  while ASC.inMap and RAID.running do task.wait(0.3) end
+ -- [GUARD v50] Tunggu SEMUA fitur lain selesai sebelum RAID masuk map
+ -- Satu guard terpusat menggantikan semua cek ASC/SIEGE/ST2 terpisah
+ do
+  local _rGuard = 0
+  while RAID.running and _rGuard < 90 do
+   local _busy, _who = IsAnyMapActive()
+   local _selfBusy = (_who == "raid")
+   if not _busy or _selfBusy then break end
+   RAID.inMap = false
+   RaidStatusUpdate("[||] Tunggu "..(_who or "?").." selesai dulu...", Color3.fromRGB(255,140,0))
+   task.wait(0.5); _rGuard = _rGuard + 0.5
+  end
   if not RAID.running then break end
-  task.wait(0.2)
- end
-
- -- [FIX] Cek Siege - pause Auto Raid selama player di dalam Siege map
- if (SIEGE and (SIEGE.inMap or SIEGE.teleporting)) or _siegeInterrupt then
- RAID.inMap = false
- RaidStatusUpdate("[||] Siege aktif - Auto Raid pause...", Color3.fromRGB(255,140,0))
- while ((SIEGE and (SIEGE.inMap or SIEGE.teleporting)) or _siegeInterrupt) and RAID.running do
- task.wait(0.5)
- end
- if not RAID.running then break end
- RaidStatusUpdate("> Siege selesai - lanjut raid...", C.ACC3)
- task.wait(0.1)
  end
 
         -- Prioritas: Rune Map + Pick Rank > Rune Map saja > Pick Rank > Difficulty
@@ -9528,11 +9578,13 @@ local function ResolveEntry()
   return IsBossEarly(name)
  end
 
- while _loadWait < 8 and RAID.running and not RAID._raidDone do
- task.wait(0.5); _loadWait = _loadWait + 0.5
- -- Mulai cari boss sejak detik ke-1 (bukan ke-2)
- if _loadWait >= 1 and not _earlyBoss then
-  for _, e in ipairs(GetRaidEnemies()) do
+ while _loadWait < 8 and RAID.running and not _raidDone do
+      task.wait(0.5); _loadWait = _loadWait + 0.5
+      if _loadWait >= 1 and not _earlyBoss then
+       -- [GUARD v50] Fallback GetEnemiesLocal() jika mapId belum update saat baru masuk raid
+       local _bList = GetRaidEnemies()
+       if #_bList == 0 then _bList = GetEnemiesLocal() end
+       for _, e in ipairs(_bList) do
    -- [FIX] Gunakan IsBossEarlyWithHint - sadar hint nama boss Ascension Tower
    if IsBossEarlyWithHint(e.model.Name) then
     _earlyBoss = e; break
@@ -12207,16 +12259,17 @@ StartSiegeLoop = function()
             end
 
             local d = SIEGE_DATA[targetMap]
-            if not RAID.running then RAID.inMap = false end
-            if RAID.inMap then
-                SiegeStatus("[FLa] Waiting Raid DONE...", Color3.fromRGB(255,140,0))
-                local _wr = 0
-                while RAID.inMap and SIEGE.running do
-                    if not RAID.running then RAID.inMap = false; break end
-                    task.wait(0.5); _wr = _wr + 0.5
+            -- [GUARD v50] Tunggu SEMUA fitur lain selesai sebelum masuk Siege
+            do
+                local _sGuard = 0
+                while SIEGE.running and _sGuard < 90 do
+                    local _busy, _who = IsAnyMapActive()
+                    local _selfBusy = (_who == "siege")
+                    if not _busy or _selfBusy then break end
+                    SiegeStatus("[||] Tunggu "..(_who or "?").." selesai...", Color3.fromRGB(255,140,0))
+                    task.wait(0.5); _sGuard = _sGuard + 0.5
                 end
                 if not SIEGE.running then break end
-                task.wait(0.3)
             end
 
             _siegeInterrupt = true
@@ -12938,6 +12991,16 @@ StartDungeonLoop = function()
  -- [v252] Dungeon priority max -> ForceSet override semua
  -- 
  MODE:ForceSet("dungeon") -- override apapun yang sedang jalan
+ -- [GUARD v50] Tunggu fitur lain selesai max 10s sebelum force interrupt
+ do
+  local _dGuard = 0
+  while _dGuard < 10 do
+   local _busy, _who = IsAnyMapActive()
+   if not _busy or _who == "dungeon" then break end
+   DungeonStatus("[||] Tunggu "..(_who or "?").." selesai...", Color3.fromRGB(255,200,60))
+   task.wait(0.5); _dGuard = _dGuard + 0.5
+  end
+ end
  DUNGEON.interrupt = true -- sync flag lama
  _siegeInterrupt = true
  _raidInterrupt = true
@@ -13328,6 +13391,19 @@ function StartST2Loop()
                     task.wait(0.1)
                 end
                 if not ST2.running then return end
+
+                -- [GUARD v50] ST2 tunggu semua fitur lain selesai dulu
+                do
+                 local _t2Wait = 0
+                 while ST2.running and _t2Wait < 90 do
+                  local _busy, _who = IsAnyMapActive()
+                  local _selfBusy = (_who == "st2")
+                  if not _busy or _selfBusy then break end
+                  ST2Status("[||] Tunggu "..(_who or "?").." selesai...", Color3.fromRGB(255,140,0))
+                  task.wait(0.5); _t2Wait = _t2Wait + 0.5
+                 end
+                 if not ST2.running then return end
+                end
 
                 -- -- STEP 1: TP ke Single Tower Map 2 ----------------------------
                 ST2Status("[>>] TP to Single Tower...", Color3.fromRGB(180,120,255))
