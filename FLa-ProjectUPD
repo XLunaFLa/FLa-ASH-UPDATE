@@ -8278,6 +8278,15 @@ function StartAscensionLoop()
     if RE.StartLocalPlayerTeleport then
      pcall(function() RE.StartLocalPlayerTeleport:FireServer({hostId=LP.UserId, mapId=targetMapId}) end)
     end
+    task.wait(0.3)
+    -- [v60 FIX] LocalPlayerTeleportSuccess: konfirmasi handshake ke server bahwa client menerima TP
+    -- Dipanggil langsung setelah StartLocalPlayerTeleport (sama seperti pattern Dungeon & Siege)
+    -- Tanpa ini server tidak tahu TP diterima -> bisa reject / kirim ulang -> tabrakan dengan RAID
+    do
+     local _ltpRe = Remotes:FindFirstChild("LocalPlayerTeleportSuccess")
+     if _ltpRe then task.spawn(function() pcall(function() _ltpRe:InvokeServer() end) end) end
+    end
+    task.wait(0.2)
 
     -- Tunggu masuk map Ascension Tower (range 50301-50326)
     -- [v56 FIX] FASE A: konfirmasi MapId masuk range Tower (max 20s)
@@ -8309,6 +8318,16 @@ function StartAscensionLoop()
      AscStatusUpdate("Gagal masuk Tower - retry...", Color3.fromRGB(255,80,80))
      task.wait(3); break
     end
+
+    -- [v60 FIX] LocalPlayerTeleportSuccess ke-2: konfirmasi ke server bahwa player sudah di dalam Tower
+    -- Dipanggil setelah _tpOk=true (workspace MapId sudah di range Tower 50301-50326)
+    -- Pattern sama dengan Siege Step 5: second confirm setelah masuk map benar-benar terkonfirmasi
+    -- Tanpa ini server tidak tahu client sudah di Tower -> bisa overlap/tabrakan dengan RAID
+    do
+     local _ltpRe2 = Remotes:FindFirstChild("LocalPlayerTeleportSuccess")
+     if _ltpRe2 then task.spawn(function() pcall(function() _ltpRe2:InvokeServer() end) end) end
+    end
+    task.wait(0.1)
 
     -- FASE B: tunggu enemy spawn - non-blocking, timeout tidak menyebabkan skip
     -- [v52 FIX] Deklarasikan _ascDone lebih awal agar bisa dipakai di loop ini
@@ -9768,6 +9787,16 @@ local function ResolveEntry()
   _raidInterrupt = false; RAID.inMap = false; ReleaseMapLock("raid"); MODE:Release("raid"); RAID.fromMapId = nil
   task.wait(3); break
  end
+
+ -- [v60 FIX] LocalPlayerTeleportSuccess: konfirmasi ke server bahwa player sudah berhasil masuk map
+ -- Dipanggil setelah _mapIdOk=true (workspace MapId sudah di range raid 50101-50120)
+ -- Pattern sama dengan Dungeon & Siege: konfirmasi handshake setelah TP diterima
+ -- Tanpa ini server tidak tahu client sudah di map -> bisa overlap/tabrakan dengan ASC
+ do
+  local _ltpRe = Remotes:FindFirstChild("LocalPlayerTeleportSuccess")
+  if _ltpRe then task.spawn(function() pcall(function() _ltpRe:InvokeServer() end) end) end
+ end
+ task.wait(0.1)
 
  -- FASE B: tunggu enemy spawn (non-blocking, timeout tidak skip)
  RaidStatusUpdate("[~] Waiting Enemy...", Color3.fromRGB(180,100,255))
@@ -12619,9 +12648,16 @@ StartSiegeLoop = function()
                 local grtRe = _RE:FindFirstChild("GetRaidTeamInfos")
                 if grtRe then task.spawn(function() pcall(function() grtRe:InvokeServer() end) end) end
                 task.wait(0.3)
-                -- Step 3: StartLocalPlayerTeleport ke tpMapId (50201-50205) -> yang bawa player masuk
+                -- [v59 FIX] Step 3a: LocalPlayerTeleport (bukan Start) dulu, dengan hostId
+                -- Tanpa hostId server reject -> player di-TP balik ke baseMapId
+                -- Urutan ini sesuai JTP flow yang confirmed bekerja
+                local ltpRe2 = _RE:FindFirstChild("LocalPlayerTeleport")
+                if ltpRe2 then pcall(function() ltpRe2:FireServer({mapId=d.tpMapId, hostId=LP.UserId}) end) end
+                task.wait(0.35)
+                -- [v59 FIX] Step 3b: StartLocalPlayerTeleport dengan hostId (WAJIB ada hostId)
+                -- Sebelumnya: {mapId=d.tpMapId} tanpa hostId -> server reject -> TP balik ke baseMap
                 local stpRe = _RE:FindFirstChild("StartLocalPlayerTeleport")
-                if stpRe then pcall(function() stpRe:FireServer({mapId=d.tpMapId}) end) end
+                if stpRe then pcall(function() stpRe:FireServer({mapId=d.tpMapId, hostId=LP.UserId}) end) end
                 task.wait(0.5)
                 -- Step 4: EquipHeroWithData
                 local eqRe = _RE:FindFirstChild("EquipHeroWithData")
