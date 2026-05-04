@@ -12502,7 +12502,7 @@ local function SiegeAttackV2_Independent(onStatus, baseMapId)
             lastKill = SIEGE.killed
             stuckT   = 0
         else
-            stuckT = stuckT + 0.08
+            stuckT = stuckT + 0.01
             -- -- Kondisi B: tidak bisa bunuh 1 musuh dalam STUCK_LIMIT detik -> skip --
             if stuckT >= STUCK_LIMIT then
                 if onStatus then onStatus("[!] Stuck "..STUCK_LIMIT.."s - Force exit Siege") end
@@ -12528,7 +12528,7 @@ local function SiegeAttackV2_Independent(onStatus, baseMapId)
             end
         end
 
-        task.wait(0.08)
+        task.wait(0.01)
     end
 
     cleanup()
