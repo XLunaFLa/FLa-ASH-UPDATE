@@ -4620,7 +4620,7 @@ do
   row.LayoutOrder = 5
   _setAutoCollectToggle = setFn
   _visAutoCollect = visFn
-  warn("injected OK"..tostring(row.LayoutOrder))
+  warn(" injected OK"..tostring(row.LayoutOrder))
  end)
  if not ok then warn(" inject error: "..tostring(err)) end
 end
