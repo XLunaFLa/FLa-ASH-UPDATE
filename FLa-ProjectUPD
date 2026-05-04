@@ -1417,53 +1417,72 @@ function WaitUntilIdle(featureName, timeout)
 end
 
 -- ============================================================
--- [GUARD SYSTEM v50] GetEnemiesLocal(folder_hint)
--- Setiap fitur baca musuh SENDIRI dari workspace.Enemys
--- Tidak ada shared state antar fitur
 -- ============================================================
-local ENEMY_FOLDERS_ALL = {"Enemys","EnemyCityRaid","CityRaidEnemys","Enemies","Enemy"}
+-- [GODMODE FIX] CENTRAL FRESH ENEMY SCANNER
+-- Selalu scan ulang workspace.Enemys (+ semua folder sibling) tiap dipanggil.
+-- Cache 0.5 detik agar tidak spam GetChildren() terlalu sering.
+-- Dipakai oleh SEMUA fitur: MA, RAID, ASC, SIEGE, Dungeon, ST2.
+-- ============================================================
+local ENEMY_FOLDERS_ALL = {"Enemys","EnemyCityRaid","CityRaidEnemys","Enemies","Enemy",
+                           "Bosses","Boss","RaidBoss","RaidEnemys","Monsters","Monster"}
+local _freshCache      = {}
+local _freshCacheTime  = 0
+local FRESH_CACHE_TTL  = 0.5  -- detik; refresh tiap 0.5s
+
+function GetFreshEnemies()
+    local now = tick()
+    if (now - _freshCacheTime) < FRESH_CACHE_TTL then
+        return _freshCache
+    end
+    -- Reset cache
+    _freshCacheTime = now
+    local list = {}
+    local seen = {}
+
+    local function _addE(e)
+        if not e:IsA("Model") then return end
+        local g = e:GetAttribute("EnemyGuid") or e:GetAttribute("BossGuid")
+               or e:GetAttribute("Guid") or e:GetAttribute("GUID")
+        if not g or seen[g] then return end
+        local h = e:FindFirstChild("HumanoidRootPart")
+               or e.PrimaryPart
+               or e:FindFirstChild("Torso")
+               or e:FindFirstChild("UpperTorso")
+               or e:FindFirstChildWhichIsA("BasePart")
+        local hum = e:FindFirstChildOfClass("Humanoid")
+        if h and hum and hum.Health > 0 then
+            seen[g] = true
+            table.insert(list, {model=e, guid=g, hrp=h})
+        end
+    end
+
+    -- Scan semua folder enemy yang dikenal
+    for _, fname in ipairs(ENEMY_FOLDERS_ALL) do
+        local f = workspace:FindFirstChild(fname)
+        if f then
+            for _, e in ipairs(f:GetChildren()) do _addE(e) end
+        end
+    end
+
+    -- Fallback: scan workspace:GetChildren() kalau semua folder kosong
+    if #list == 0 then
+        for _, obj in ipairs(workspace:GetChildren()) do
+            _addE(obj)
+            -- Scan nested (untuk SIEGE: CityRaidEnter, dll)
+            if obj:IsA("Model") or obj:IsA("Folder") then
+                for _, child in ipairs(obj:GetChildren()) do _addE(child) end
+            end
+        end
+    end
+
+    _freshCache = list
+    return list
+end
+
+-- [GODMODE FIX] GetEnemiesLocal → alias ke GetFreshEnemies (agar semua caller lama tetap berfungsi)
 function GetEnemiesLocal()
- local list = {}
- local seen = {}
- for _, fname in ipairs(ENEMY_FOLDERS_ALL) do
-  local f = workspace:FindFirstChild(fname)
-  if f then
-   for _, e in ipairs(f:GetChildren()) do
-    if e:IsA("Model") then
-     local g = e:GetAttribute("EnemyGuid") or e:GetAttribute("BossGuid") or e:GetAttribute("Guid") or e:GetAttribute("GUID")
-     local h = e:FindFirstChild("HumanoidRootPart")
-           or e.PrimaryPart
-           or e:FindFirstChild("Torso")
-           or e:FindFirstChild("UpperTorso")
-           or e:FindFirstChildWhichIsA("BasePart")
-     local hum = e:FindFirstChildOfClass("Humanoid")
-     if g and h and hum and hum.Health > 0 and not seen[g] then
-      seen[g] = true
-      table.insert(list, {model=e, guid=g, hrp=h})
-     end
-    end
-   end
-  end
- end
- -- Fallback: scan workspace langsung kalau folder kosong
- if #list == 0 then
-  for _, obj in ipairs(workspace:GetChildren()) do
-   if obj:IsA("Model") then
-    local g = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid") or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
-    local h = obj:FindFirstChild("HumanoidRootPart")
-          or obj.PrimaryPart
-          or obj:FindFirstChild("Torso")
-          or obj:FindFirstChild("UpperTorso")
-          or obj:FindFirstChildWhichIsA("BasePart")
-    local hum = obj:FindFirstChildOfClass("Humanoid")
-    if g and h and hum and hum.Health > 0 and not seen[g] then
-     seen[g] = true
-     table.insert(list, {model=obj, guid=g, hrp=h})
-    end
-   end
-  end
- end
- return list
+    _freshCacheTime = 0  -- paksa refresh fresh
+    return GetFreshEnemies()
 end
 
 _raidInterrupt = false -- true saat raid muncul & Mass Attack harus pause
@@ -1587,31 +1606,9 @@ end)
 -- ENEMY HELPERS
 -- ============================================================
 function GetEnemies()
- local list = {}
- -- [v51-FIX] Tambah "Enemy" ke folder list (konsisten dengan GetEnemiesLocal)
- local ENEMY_FOLDERS = {"Enemys", "EnemyCityRaid", "CityRaidEnemys", "Enemies", "Enemy"}
- local seen = {}
- local function _addEnemy(e)
-  if not e:IsA("Model") then return end
-  local g = e:GetAttribute("EnemyGuid") or e:GetAttribute("BossGuid") or e:GetAttribute("Guid") or e:GetAttribute("GUID")
-  local h = e:FindFirstChild("HumanoidRootPart")
-  local hum = e:FindFirstChildOfClass("Humanoid")
-  if g and h and hum and hum.Health > 0 and not seen[g] then
-   seen[g] = true
-   table.insert(list, {model=e, guid=g, hrp=h})
-  end
- end
- for _, folderName in ipairs(ENEMY_FOLDERS) do
-  local f = workspace:FindFirstChild(folderName)
-  if f then
-   for _, e in ipairs(f:GetChildren()) do _addEnemy(e) end
-  end
- end
- -- [v51-FIX] Fallback: scan workspace:GetChildren() jika semua folder kosong
- if #list == 0 then
-  for _, obj in ipairs(workspace:GetChildren()) do _addEnemy(obj) end
- end
- return list
+    -- [GODMODE FIX] Selalu ambil data FRESH dari workspace, cache 0.5s
+    _freshCacheTime = 0  -- paksa refresh agar tidak pakai data stale
+    return GetFreshEnemies()
 end
 
 function IsDead(e)
@@ -1939,12 +1936,14 @@ function AttackLoop_Mass(onStatus)
  -- ============================================================
  local wt = 0
  while wt < 10 and MA.running do
-  if #GetEnemies() > 0 then break end
+  _freshCacheTime = 0  -- [GODMODE FIX] paksa refresh tiap cek
+  if #GetFreshEnemies() > 0 then break end
   if onStatus then onStatus("Nunggu musuh... ("..math.floor(10-wt).."s)") end
   task.wait(0.4); wt = wt + 0.4
  end
  if not MA.running then return false end
- if #GetEnemies() == 0 then
+ _freshCacheTime = 0
+ if #GetFreshEnemies() == 0 then
   if onStatus then onStatus("Kosong, skip map...") end
   return true
  end
@@ -1991,9 +1990,10 @@ function AttackLoop_Mass(onStatus)
   local isAll = (MA.killTarget == 0)
   local here  = MA.killed - start
 
-  -- Hitung musuh hidup saat ini dari workspace langsung
+  -- Hitung musuh hidup saat ini dari workspace langsung (FRESH, tidak pakai cache)
+  _freshCacheTime = 0  -- [GODMODE FIX] paksa refresh tiap iterasi
   local alive = 0
-  for _, e in ipairs(GetEnemies()) do
+  for _, e in ipairs(GetFreshEnemies()) do
    if not IsDead(e) then alive = alive + 1 end
   end
 
@@ -2029,7 +2029,7 @@ function AttackLoop_Mass(onStatus)
   end
 
   -- -- Serang semua musuh hidup --
-  for _, e in ipairs(GetEnemies()) do
+  for _, e in ipairs(GetFreshEnemies()) do
    if not IsDead(e) then
     local hrp = e.model and e.model:FindFirstChild("HumanoidRootPart")
     if hrp then
@@ -4667,27 +4667,9 @@ do
  end
 
  local function GetEnemiesF()
-  local list = {}
-  local seen = {}
-  -- Primary + fallback folders
-  local FOLDERS = {"Enemys","EnemyCityRaid","CityRaidEnemys","Enemies","Enemy"}
-  for _, fname in ipairs(FOLDERS) do
-   local f = workspace:FindFirstChild(fname)
-   if f then
-    for _,e in ipairs(f:GetChildren()) do
-     if e:IsA("Model") then
-      local g = e:GetAttribute("EnemyGuid")
-      local h = e:FindFirstChild("HumanoidRootPart")
-      local hum = e:FindFirstChildOfClass("Humanoid")
-      if g and h and hum and hum.Health>0 and not seen[g] and IsPosValidF(h) then
-       seen[g] = true
-       table.insert(list, {model=e, guid=g, hrp=h})
-      end
-     end
-    end
-   end
-  end
-  return list
+  -- [GODMODE FIX] Paksa refresh FRESH tiap dipanggil di panel Farm
+  _freshCacheTime = 0
+  return GetFreshEnemies()
  end
 
  local function IsDeadF(e)
@@ -8405,33 +8387,11 @@ function StartAscensionLoop()
      while _loadWait < 10 and ASC.running and not _ascDone do
       task.wait(0.5); _loadWait = _loadWait + 0.5
       if _loadWait >= 1 and not _earlyBoss then
-       -- Sumber 1: GetRaidEnemies()
-       local _eList = GetRaidEnemies()
-       -- Sumber 2: fallback GetEnemiesLocal() kalau kosong
-       if #_eList == 0 then _eList = GetEnemiesLocal() end
+       -- [GODMODE FIX] Paksa refresh fresh tiap iterasi — tidak ada stale data
+       _freshCacheTime = 0
+       local _eList = GetFreshEnemies()
        for _, e in ipairs(_eList) do
         if IsBossAscWithHint(e.model.Name) then _earlyBoss = e; break end
-       end
-       -- Sumber 3: scan folder langsung kalau masih belum ketemu
-       if not _earlyBoss then
-        pcall(function()
-         for _, fname in ipairs({"Bosses","Boss","RaidBoss","Enemys","Enemy","Enemies","RaidEnemys","Monsters","Monster"}) do
-          local f = workspace:FindFirstChild(fname)
-          if f then
-           for _, obj in ipairs(f:GetChildren()) do
-            if obj:IsA("Model") and IsBossAscWithHint(obj.Name) then
-             local g = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid") or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
-             local hrp = obj:FindFirstChild("HumanoidRootPart")
-             local hum = obj:FindFirstChildOfClass("Humanoid")
-             if g and hrp and hum and hum.Health > 0 then
-              _earlyBoss = {guid=g, hrp=hrp, model=obj}; break
-             end
-            end
-           end
-          end
-          if _earlyBoss then break end
-         end
-        end)
        end
       end
       if _earlyBoss then
@@ -8479,13 +8439,12 @@ function StartAscensionLoop()
      end))
 
      -- [FIX v50] Cari boss - max 40s (Tower butuh lebih lama dari RAID)
-     -- Pakai GetRaidEnemies() + fallback GetEnemiesLocal() tiap iterasi
+     -- Pakai GetFreshEnemies() (paksa refresh) tiap iterasi — tidak ada stale data
      local waitBoss = 0
      while ASC.running and not boss and waitBoss < 40 and not _ascDone do
-      -- Coba GetRaidEnemies() dulu
-      local _bList = GetRaidEnemies()
-      -- Fallback: kalau kosong (mapId belum update), pakai GetEnemiesLocal()
-      if #_bList == 0 then _bList = GetEnemiesLocal() end
+      -- Paksa refresh cache tiap iterasi
+      _freshCacheTime = 0
+      local _bList = GetFreshEnemies()
       for _, e in ipairs(_bList) do
        if IsBossAscWithHint(e.model.Name) then boss = e; break end
       end
@@ -8917,69 +8876,36 @@ end
 -- [GODMODE FIX] Relax filter jarak, tambah fallback scan seluruh workspace
 -- [GODMODE FIX 2] Validasi mapId realtime - pastikan player di dalam raid map
 function GetRaidEnemies()
- local list = {}
- local seen = {}
+    -- [GODMODE FIX] Paksa refresh data FRESH dari workspace tiap dipanggil
+    _freshCacheTime = 0
+    local fresh = GetFreshEnemies()
+    if #fresh > 0 then return fresh end
 
- -- [v51-FIX] Hapus hard early-return berdasarkan MapId — terlalu agresif.
- -- Guard lama menyebabkan scan gagal saat MapId belum update (race condition Delta Android)
- -- atau saat workspace.MapId pakai attribute name berbeda dari yang di-read.
- -- Sekarang: tetap scan workspace, hanya matikan distFilter jika mapId tidak dikenali.
- local currentMapId = GetCurrentMapId()
- local _inNormalRaid = currentMapId and (currentMapId >= 50101 and currentMapId <= 50120)
- local _inAscTower  = currentMapId and (currentMapId >= 50301 and currentMapId <= 50326)
- -- (tidak ada early return di sini — biarkan scan tetap berjalan)
-
- -- spawnPos hanya relevan untuk Normal Raid (Ascension Tower tidak pakai RAID_SPAWN_POS)
- local activeMapId = (_inNormalRaid and RAID and RAID.serverMapId) or nil
- local spawnPos = activeMapId and RAID_SPAWN_POS and RAID_SPAWN_POS[activeMapId]
- -- [FIX] Perbesar radius 2000->8000 agar boss yang spawn jauh tetap terdeteksi
- -- Map 19/20 punya spawnPos 0,0,0 - jika spawnPos tidak valid (magnitude<1), nonaktifkan filter
- local MAX_DIST = 8000
- local useDistFilter = spawnPos and spawnPos.Magnitude > 1
-
- local function addEnemy(e)
- if not e:IsA("Model") then return end
- local g = e:GetAttribute("EnemyGuid") or e:GetAttribute("BossGuid") or e:GetAttribute("Guid") or e:GetAttribute("GUID")
- if not g or seen[g] then return end
- -- Fallback: beberapa boss (Giant Arachnid, dll) tidak punya HumanoidRootPart
- -- Coba HumanoidRootPart -> PrimaryPart -> Torso -> UpperTorso -> bagian apapun
- local hrp = e:FindFirstChild("HumanoidRootPart")
-       or e.PrimaryPart
-       or e:FindFirstChild("Torso")
-       or e:FindFirstChild("UpperTorso")
-       or e:FindFirstChildWhichIsA("BasePart")
- local hum = e:FindFirstChildOfClass("Humanoid")
- if not (hrp and hum and hum.Health > 0) then return end
- if useDistFilter then
- local dist = (hrp.Position - spawnPos).Magnitude
- if dist > MAX_DIST then return end
- end
- seen[g] = true
- table.insert(list, {guid=g, hrp=hrp, model=e})
- end
-
- -- Scan folder-folder utama
- for _, fname in ipairs({"Bosses","Boss","RaidBoss","Enemys","Enemy","Enemies","RaidEnemys","Monsters","Monster"}) do
- local folder = workspace:FindFirstChild(fname)
- if folder then
- for _, e in ipairs(folder:GetChildren()) do addEnemy(e) end
- end
- end
-
- -- [GODMODE FIX] Fallback: scan langsung children workspace jika folder tidak ketemu / list kosong
- if #list == 0 then
- for _, obj in ipairs(workspace:GetChildren()) do
- if obj:IsA("Model") then
- addEnemy(obj)
- -- Scan nested (beberapa game taruh enemy di sub-model)
- for _, child in ipairs(obj:GetChildren()) do
- addEnemy(child)
- end
- end
- end
- end
-
- return list
+    -- Fallback khusus RAID: coba cari di sub-model workspace (beberapa game taruh enemy nested)
+    local list = {}
+    local seen = {}
+    pcall(function()
+        for _, obj in ipairs(workspace:GetChildren()) do
+            if obj:IsA("Model") or obj:IsA("Folder") then
+                for _, child in ipairs(obj:GetChildren()) do
+                    if child:IsA("Model") then
+                        local g = child:GetAttribute("EnemyGuid") or child:GetAttribute("BossGuid")
+                               or child:GetAttribute("Guid") or child:GetAttribute("GUID")
+                        if g and not seen[g] then
+                            local h = child:FindFirstChild("HumanoidRootPart") or child.PrimaryPart
+                                   or child:FindFirstChild("Torso") or child:FindFirstChildWhichIsA("BasePart")
+                            local hum = child:FindFirstChildOfClass("Humanoid")
+                            if h and hum and hum.Health > 0 then
+                                seen[g] = true
+                                table.insert(list, {guid=g, hrp=h, model=child})
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    return list
 end
 
 -- Serang semua enemy raid
@@ -9908,9 +9834,9 @@ local function ResolveEntry()
  while _loadWait < 8 and RAID.running and not _raidDone do
       task.wait(0.5); _loadWait = _loadWait + 0.5
       if _loadWait >= 1 and not _earlyBoss then
-       -- [GUARD v50] Fallback GetEnemiesLocal() jika mapId belum update saat baru masuk raid
-       local _bList = GetRaidEnemies()
-       if #_bList == 0 then _bList = GetEnemiesLocal() end
+       -- [GODMODE FIX] Paksa refresh fresh tiap iterasi — tidak ada stale data
+       _freshCacheTime = 0
+       local _bList = GetFreshEnemies()
        for _, e in ipairs(_bList) do
    -- [FIX] Gunakan IsBossEarlyWithHint - sadar hint nama boss Ascension Tower
    if IsBossEarlyWithHint(e.model.Name) then
@@ -10020,7 +9946,8 @@ local function ResolveEntry()
  end))
 
  while RAID.running and not boss and waitBoss < 30 and not RAID._raidDone do
- for _, e in ipairs(GetRaidEnemies()) do
+ _freshCacheTime = 0  -- [GODMODE FIX] paksa refresh tiap iterasi
+ for _, e in ipairs(GetFreshEnemies()) do
  if IsBossWithHint(e.model.Name) then boss = e; break end
  end
  if not boss then
@@ -12237,37 +12164,9 @@ local function IsInSiegeMap()
 end
 
 local function GetSiegeEnemies()
-    -- [FIX v8] Deteksi musuh identik dengan GetEnemiesF() di panel Farm:
-    -- Wajib punya EnemyGuid attribute + HumanoidRootPart + Humanoid.Health > 0
-    -- TIDAK scan workspace.Heros (bisa false-detect hero player)
-    -- TIDAK pakai fallback key Name..DebugId (menyebabkan musuh mati tetap terhitung)
-    local list = {}
-    local seen = {}
-    local FOLDERS = {"Enemys", "EnemyCityRaid", "CityRaidEnemys", "Enemies", "Enemy"}
-    local function _addSiegeEnemy(e)
-        if not e:IsA("Model") then return end
-        local g   = e:GetAttribute("EnemyGuid") or e:GetAttribute("BossGuid") or e:GetAttribute("Guid") or e:GetAttribute("GUID")
-        local h   = e:FindFirstChild("HumanoidRootPart")
-        local hum = e:FindFirstChildOfClass("Humanoid")
-        if g and h and hum and hum.Health > 0 and not seen[g] then
-            seen[g] = true
-            table.insert(list, {model=e, guid=g, hrp=h, hasGuid=true})
-        end
-    end
-    for _, fname in ipairs(FOLDERS) do
-        local f = workspace:FindFirstChild(fname)
-        if f then
-            for _, e in ipairs(f:GetChildren()) do _addSiegeEnemy(e) end
-        end
-    end
-    -- [v51-FIX] Fallback: scan workspace:GetChildren() jika semua folder kosong/tidak ada
-    -- Penting untuk Siege & Dungeon agar tidak miss musuh saat folder name berubah di update game
-    if #list == 0 then
-        for _, obj in ipairs(workspace:GetChildren()) do
-            _addSiegeEnemy(obj)
-        end
-    end
-    return list
+    -- [GODMODE FIX] Paksa refresh FRESH tiap dipanggil — tidak ada stale data
+    _freshCacheTime = 0
+    return GetFreshEnemies()
 end
 
 local function SiegeBlindFire()
@@ -12386,7 +12285,8 @@ local function SiegeAttackV2_Independent(onStatus, baseMapId)
             local wm = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
             if type(wm) == "number" and wm >= 50201 and wm <= 50205 then _confirmedInSiege = true end
         end)
-        local enemies = GetSiegeEnemies()
+        _freshCacheTime = 0  -- [GODMODE FIX] paksa refresh tiap cek
+        local enemies = GetFreshEnemies()
         -- filter dead lokal
         local liveNow = 0
         for _, e in ipairs(enemies) do
@@ -12404,7 +12304,8 @@ local function SiegeAttackV2_Independent(onStatus, baseMapId)
 
     -- Cek setelah tunggu: kalau tetap kosong -> anggap selesai langsung
     do
-        local enemies = GetSiegeEnemies()
+        _freshCacheTime = 0
+        local enemies = GetFreshEnemies()
         local liveNow = 0
         for _, e in ipairs(enemies) do
             if not _deadG_Siege[e.guid] then liveNow = liveNow + 1 end
@@ -12425,15 +12326,18 @@ local function SiegeAttackV2_Independent(onStatus, baseMapId)
     while SIEGE.running and SIEGE.inMap do
         totalTime = totalTime + 0.08
 
-        -- [FIX GODMODE] Guard realtime: STOP jika player sudah kembali ke basemap (50001-50020)
-        -- Mencegah Siege terus menyerang musuh di portal basemap setelah keluar dari Siege map
+        -- [GODMODE FIX] Guard realtime: STOP jika player sudah kembali ke basemap (50001-50020)
+        -- WAJIB cek _confirmedInSiege dulu — jika belum pernah masuk siege map,
+        -- jangan salah deteksi sebagai "sudah keluar" padahal masih di Lobby sebelum masuk
         do
             local _ok, _wm = pcall(function()
                 return workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
             end)
             if _ok and type(_wm) == "number" then
-                if _wm >= 50001 and _wm <= 50020 then
-                    -- Player sudah di basemap, stop attack siege
+                -- Konfirmasi masuk siege map (50201-50205)
+                if _wm >= 50201 and _wm <= 50205 then _confirmedInSiege = true end
+                -- Hanya stop jika SUDAH pernah konfirmasi masuk siege (bukan false-positive di lobby awal)
+                if _confirmedInSiege and _wm >= 50001 and _wm <= 50020 then
                     cleanup(); return "exited_clean"
                 end
             end
@@ -12455,8 +12359,9 @@ local function SiegeAttackV2_Independent(onStatus, baseMapId)
             cleanup(); return "timeout"
         end
 
-        -- Ambil musuh hidup dari workspace (sama persis logika MA Kill All)
-        local rawEnemies = GetSiegeEnemies()
+        -- Ambil musuh hidup dari workspace FRESH tiap iterasi (tidak pakai cache stale)
+        _freshCacheTime = 0  -- [GODMODE FIX] paksa refresh tiap iterasi attack
+        local rawEnemies = GetFreshEnemies()
         local alive = 0
         local targets = {}
         for _, e in ipairs(rawEnemies) do
@@ -13136,7 +13041,8 @@ local function DungeonAttackLoop(onStatus)
             if onStatus then onStatus("[!] Keluar map dungeon") end
             cleanup(); return "exited_by_server"
         end
-        if #GetEnemies() > 0 then break end
+        _freshCacheTime = 0  -- [GODMODE FIX] paksa refresh
+        if #GetFreshEnemies() > 0 then break end
         if onStatus then onStatus("[~] Tunggu musuh dungeon... (" .. math.floor(30-wt) .. "s)") end
         task.wait(0.4); wt = wt + 0.4
     end
@@ -13151,10 +13057,11 @@ local function DungeonAttackLoop(onStatus)
             cleanup(); return "exited_by_server"
         end
 
-        -- Ambil semua musuh hidup (SAMA PERSIS dengan GetEnemies() Mass Attack)
+        -- Ambil semua musuh hidup FRESH dari workspace (paksa refresh tiap iterasi)
+        _freshCacheTime = 0  -- [GODMODE FIX] selalu fresh, tidak pakai cache stale
         local alive   = 0
         local targets = {}
-        for _, e in ipairs(GetEnemies()) do
+        for _, e in ipairs(GetFreshEnemies()) do
             if not _deadG_D[e.guid] then
                 if e.model and e.model.Parent then
                     local hum = e.model:FindFirstChildOfClass("Humanoid")
