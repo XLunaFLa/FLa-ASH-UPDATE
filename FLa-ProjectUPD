@@ -2793,10 +2793,10 @@ DoAutoRollHalo = function(hi, on)
 
  if not ok then
  setStatus("[!] Error - retry...", Color3.fromRGB(255,100,60))
- task.wait(1)
+ task.wait(0.1)
  else
  setStatus("[OK] Roll #"..attempt.." DONE", Color3.fromRGB(80,220,80))
- task.wait(0.05)
+ task.wait(0.1)
  end
  end
  setStatus("[.] Idle", Color3.fromRGB(160,148,135))
@@ -10180,7 +10180,7 @@ local function ResolveEntry()
  end
  -- Jika masih tidak ada boss setelah last chance, keluar
  if not boss and RAID.running then
- RaidStatusUpdate("[FLa] Boss not found (30s) - Go Out...", Color3.fromRGB(255,150,50))
+ RaidStatusUpdate("[FLa] Boss not found- Go Out...", Color3.fromRGB(255,150,50))
  task.wait(3)
  end
  end -- if boss
@@ -10238,7 +10238,7 @@ local function ResolveEntry()
  pcall(function()
  local wm = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
  if wm then
- ok = (wm >= 50101 and wm <= 50118)
+ ok = (wm >= 50101 and wm <= 50120)
  end
  end)
  return ok
@@ -12556,30 +12556,30 @@ StartSiegeLoop = function()
                 if not enterRe then return false end
                 -- Step 1: EnterCityRaidMap (daftarkan player ke city raid di server)
                 pcall(function() enterRe:FireServer(d.cityRaidId) end)
-                task.wait(0.8)
+                task.wait(1)
                 if not SIEGE.running then return false end
                 -- Step 2: GetRaidTeamInfos (sync tim)
                 local grtRe = _RE:FindFirstChild("GetRaidTeamInfos")
                 if grtRe then task.spawn(function() pcall(function() grtRe:InvokeServer() end) end) end
-                task.wait(0.3)
+                task.wait(1)
                 -- Step 3: StartLocalPlayerTeleport TANPA hostId (confirmed v41)
                 -- hostId menyebabkan server treat player sebagai host, bukan peserta
                 -- -> count/timer/reward hilang karena tidak terdaftar sebagai participant
                 local stpRe = _RE:FindFirstChild("StartLocalPlayerTeleport")
                 if stpRe then pcall(function() stpRe:FireServer({mapId=d.tpMapId}) end) end
-                task.wait(0.5)
+                task.wait(1)
                 -- Step 4: EquipHeroWithData
                 local eqRe = _RE:FindFirstChild("EquipHeroWithData")
                 if eqRe then pcall(function() eqRe:FireServer() end) end
-                task.wait(0.3)
+                task.wait(1)
                 -- Step 5: LocalPlayerTeleportSuccess (konfirmasi ke server)
                 local ltpRe = _RE:FindFirstChild("LocalPlayerTeleportSuccess")
                 if ltpRe then task.spawn(function() pcall(function() ltpRe:InvokeServer() end) end) end
-                task.wait(0.3)
+                task.wait(1)
                 -- Step 6: GetRaidTeamInfos kedua (final sync)
                 local grtRe2 = _RE:FindFirstChild("GetRaidTeamInfos")
                 if grtRe2 then task.spawn(function() pcall(function() grtRe2:InvokeServer() end) end) end
-                task.wait(0.3)
+                task.wait(1)
                 return true
             end
 
@@ -12588,8 +12588,8 @@ StartSiegeLoop = function()
                 local _RE0 = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
                 if not (_RE0 and _RE0:FindFirstChild("EnterCityRaidMap")) then
                     _siegeInterrupt = false; MODE:Release("siege")
-                    SiegeStatus("[!] EnterCityRaidMap Not Found - retry 5s...", Color3.fromRGB(255,100,60))
-                    task.wait(5); break
+                    SiegeStatus("[!] EnterCityRaidMap Not Found - retry ...", Color3.fromRGB(255,100,60))
+                    task.wait(1); break
                 end
             end
             if not SIEGE.running then _siegeInterrupt = false; MODE:Release("siege"); break end
@@ -12621,7 +12621,7 @@ StartSiegeLoop = function()
             if not _entered then
                 _siegeInterrupt = false; MODE:Release("siege")
                 SiegeStatus("[!] Failure Enter - retry 3s...", Color3.fromRGB(255,100,60))
-                task.wait(3); break
+                task.wait(1); break
             end
 
             SIEGE.inMap = true
@@ -13681,7 +13681,7 @@ function StartST2Loop()
                 local entered = ST2ConfirmIn(15)
                 if not entered then
                     ST2Status("[!] Failure Enter - retry...", Color3.fromRGB(255,100,60))
-                    task.wait(3)
+                    task.wait(1)
                     break -- Kembali ke awal loop
                 end
 
@@ -13693,7 +13693,7 @@ function StartST2Loop()
                 if not ST2.attackEnabled then
                     ST2Status("[||] Attack OFF - Waiting...", Color3.fromRGB(255,140,0))
                     while ST2.running and not ST2.attackEnabled do
-                        task.wait(0.3)
+                        task.wait(1)
                     end
                     if not ST2.running then return end
                 end
@@ -15971,7 +15971,7 @@ do
 
  if not ok then
  setStatus("[!] Error - retry...", Color3.fromRGB(255,100,60))
- task.wait(0.5); break
+ task.wait(0.1); break
  end
 
  -- [v216] Parse gradeId rekursif - confirmed ada di res.data.grade
