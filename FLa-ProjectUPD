@@ -8271,15 +8271,16 @@ function StartAscensionLoop()
     task.wait(0.3)
     if not ASC.running then ASC.inMap = false; break end
 
-    -- STEP 2: StartChallengeRaidMap dengan targetMapId (Tower map)
-    -- Sama seperti RAID normal - server butuh mapId untuk tahu mau masuk Tower mana
+    -- STEP 2: StartChallengeRaidMap TANPA argumen (confirmed SimpleSPY)
+    -- ASC berbeda dari RAID normal: server handle routing via raidId (935001+) yang sudah di-set
+    -- di CreateRaidTeam. mapId tidak diperlukan di sini.
     local _cfail = false
     local _cfConn
     local _cfRe = Remotes:FindFirstChild("ChallengeRaidsFail")
     if _cfRe then _cfConn = _cfRe.OnClientEvent:Connect(function() _cfail = true end) end
 
     if RE.StartChallengeRaidMap then
-     pcall(function() RE.StartChallengeRaidMap:FireServer({mapId = targetMapId}) end)
+     pcall(function() RE.StartChallengeRaidMap:FireServer() end)
     end
     task.wait(0.3)
     if not ASC.running then
@@ -8287,10 +8288,18 @@ function StartAscensionLoop()
      ASC.inMap = false; break
     end
 
-    -- STEP 3: StartLocalPlayerTeleport({hostId=LP.UserId, mapId=50301-50326})
+    -- STEP 3: StartLocalPlayerTeleport + LocalPlayerTeleportSuccess
+    -- Pattern sama dengan DUNGEON (confirmed working):
+    -- StartLocalPlayerTeleport -> wait 0.3 -> LocalPlayerTeleportSuccess (konfirmasi ke server)
+    -- Tanpa LocalPlayerTeleportSuccess server tidak tahu TP diterima -> player stuck di lobby
     AscStatusUpdate("[~] TP ke Tower "..mn.."...", Color3.fromRGB(100,200,255))
     if RE.StartLocalPlayerTeleport then
      pcall(function() RE.StartLocalPlayerTeleport:FireServer({hostId=LP.UserId, mapId=targetMapId}) end)
+    end
+    task.wait(0.3)
+    do
+     local _ltpSucc = Remotes:FindFirstChild("LocalPlayerTeleportSuccess")
+     if _ltpSucc then task.spawn(function() pcall(function() _ltpSucc:InvokeServer() end) end) end
     end
 
     -- Tunggu masuk map Ascension Tower (range 50301-50326)
