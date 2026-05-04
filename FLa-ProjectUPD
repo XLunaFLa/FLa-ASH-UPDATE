@@ -7946,6 +7946,21 @@ local function GetAscensionList()
  return list
 end
 
+-- [FIX GODMODE] Helper: baca mapId player saat ini secara realtime
+local function GetCurrentMapId()
+ local ok, wm = pcall(function()
+  return workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
+ end)
+ return (ok and type(wm) == "number") and wm or nil
+end
+
+-- [FIX GODMODE] Helper: player posisi realtime
+local function GetPlayerPos()
+ local char = LP and LP.Character
+ local hrp = char and char:FindFirstChild("HumanoidRootPart")
+ return hrp and hrp.Position or nil
+end
+
 function StartAscensionLoop()
  StopAscension()
  ASC.running = true
@@ -8858,20 +8873,6 @@ function RaidCollectAll()
  end
 end
 
--- [FIX GODMODE] Helper: baca mapId player saat ini secara realtime
-local function GetCurrentMapId()
- local ok, wm = pcall(function()
-  return workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
- end)
- return (ok and type(wm) == "number") and wm or nil
-end
-
--- [FIX GODMODE] Helper: player posisi realtime
-local function GetPlayerPos()
- local char = LP and LP.Character
- local hrp = char and char:FindFirstChild("HumanoidRootPart")
- return hrp and hrp.Position or nil
-end
 
 -- Scan enemy/boss di workspace
 -- [GODMODE FIX] Relax filter jarak, tambah fallback scan seluruh workspace
