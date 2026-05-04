@@ -1209,6 +1209,7 @@ ASC = {
 _ascOn = false
 _ascWakeup = nil -- BindableEvent untuk wakeup loop
 _visAscension = nil -- visual pill toggle
+_ASC_CHAT_CACHE = {} -- [mapNum] = {grade, bossName} dari chat parser; dipakai ParseRaidEntry
 -- [v56 DEPRECATED] _ascDominatedThisEvent tidak dipakai lagi
 -- Logika baru: RAID standby selama ASC.running=true DAN ResolveAscEntry()~=nil
 -- RAID boleh jalan HANYA kalau ResolveAscEntry()=nil (tidak ada Tower match di event saat ini)
@@ -6835,23 +6836,21 @@ function ParseChatLine(text)
  if shouldUpdate then _runeGradeCache[cacheKey] = grade end
 
  if isAscension then
- -- [Ascension Mode] Buat entry Ascension di RAID_LIVE dengan id unik negatif
- -- mapId pakai 50000 + mapNum (sama dengan normal) tapi flag isAscension = true
- local ascId = -(50000 + mapNum) -- id negatif agar tidak bentrok dengan raid normal
- RAID_LIVE[ascId] = {
- raidId = ascId,
- mapId = 50000 + mapNum,
- spawnName = "RE1001",
- rank = 0,
- grade = grade,
- isAscension = true,
- bossName = _ascBossName, -- [FIX] nama boss dari teks notifikasi, lowercase
- endTime = os.time() + 300, -- estimasi 5 menit window
- label = "Ascension Tower "..mapNum..(_ascBossName and (" - "..(_ascBossName:gsub("^%l",string.upper))) or "").." ["..grade.."]",
+ -- Simpan info ASC ke cache saja - JANGAN buat entry RAID_LIVE negatif
+ -- Entry RAID_LIVE akan dibuat saat server kirim data via EnterRaidsUpdateInfo/ParseRaidEntry
+ -- dengan raidId asli (935001+), sama persis seperti sistem RAID normal
+ if not _ASC_CHAT_CACHE then _ASC_CHAT_CACHE = {} end
+ _ASC_CHAT_CACHE[mapNum] = {
+  grade = grade,
+  bossName = _ascBossName,
+  time = os.time(),
  }
- if RebuildRaidList then pcall(RebuildRaidList) end
- -- [v58] Jangan langsung fire _ascWakeup di sini - TriggerEntryWakeup() di bawah
- -- yang akan menangani ini setelah debounce 3 detik
+ -- Update grade cache (key negatif agar tidak bentrok dengan RAID normal)
+ -- dipakai ParseRaidEntry saat server data datang
+ if _runeGradeCache and grade and grade ~= "?" then
+  _runeGradeCache[-mapNum] = grade
+ end
+ -- Jangan buat entry RAID_LIVE di sini - tunggu server
  else
  -- Update isAscension = false untuk entry normal di RAID_LIVE
  for rid, entry in pairs(RAID_LIVE) do
@@ -7412,48 +7411,41 @@ ParseRaidEntry = function(k, info)
  local mapId = info.mapId
  local spawnName = info.spawnName or "RE1001"
  if not raidId or not mapId then return end
- -- Normalize mapId: 50101-50118 -> 50001-50018
+ -- Normalize mapId: 50101-50120 -> 50001-50020 (RAID normal)
  if mapId >= 50101 and mapId <= 50120 then
- mapId = mapId - 100
+  mapId = mapId - 100
  end
- if mapId < 50001 or mapId > 50020 then return end
+ -- ASC Tower: mapId 50301-50326 langsung valid (tidak perlu normalize)
+ local isAscEntry = (mapId >= 50301 and mapId <= 50326)
+ if not isAscEntry and (mapId < 50001 or mapId > 50020) then return end
  local rank = SPAWN_RANK[spawnName] or 0
- local mapNum = mapId - 50000
+ -- ASC: mapNum = mapId - 50300 (Tower 1-26), RAID: mapNum = mapId - 50000 (Map 1-20)
+ local mapNum = isAscEntry and (mapId - 50300) or (mapId - 50000)
  local mapName = MAP_NAMES[mapNum] or ("Map "..mapNum)
- local grade = (RAID_CONFIG_GRADE and RAID_CONFIG_GRADE[raidId]) or (_runeGradeCache and _runeGradeCache[mapNum]) or "?"
+ -- Grade: ASC pakai _runeGradeCache[negatif] dari chat parser, RAID pakai RAID_CONFIG_GRADE
+ local _ascCacheKey = isAscEntry and (-mapNum) or nil
+ local grade = (RAID_CONFIG_GRADE and RAID_CONFIG_GRADE[raidId])
+  or (_ascCacheKey and _runeGradeCache and _runeGradeCache[_ascCacheKey])
+  or (_runeGradeCache and _runeGradeCache[mapNum])
+  or "?"
  local rankLbl = grade ~= "?" and ("["..grade.."]") or "[?]"
- -- [FIX Ascension] Preserve isAscension dan bossName dari entry chat yang sudah ada
- -- (Chat parser buat entry negatif dulu, ParseRaidEntry replace dengan raidId asli dari server)
- -- [FIX Map 20] Map 20 normal dan Ascension Tower 20 punya mapId/mapNum sama (50020/20)
- -- Gunakan raidId > 0 sebagai penjaga: entry ini adalah raid NORMAL, jangan warisi isAscension
- local _prevAsc = false
- local _prevBossName = nil
- -- Satu-satunya sumber kebenaran isAscension = entry negatif YANG MASIH ADA di RAID_LIVE.
- -- Chat parser membuat RAID_LIVE[-(mapId)] saat notif Ascension Tower masuk.
- -- Saat server kirim raidId asli, ParseRaidEntry replace entry temp itu dengan raidId positif.
- -- JANGAN pakai _runeGradeCache negatif: cache itu persisten lintas batch,
- -- akan salah mark RAID Normal sebagai Ascension di batch berikutnya.
- local _ascCacheKey = -(mapId)
- if RAID_LIVE[_ascCacheKey] and RAID_LIVE[_ascCacheKey].isAscension then
-  _prevAsc = true
-  _prevBossName = RAID_LIVE[_ascCacheKey].bossName
-  RAID_LIVE[_ascCacheKey] = nil -- hapus entry temp, ganti dengan raidId asli server
- end
- -- raidId positif dari server = RAID Normal, KECUALI entry temp Ascension di atas terpenuhi.
- -- RAID Normal dan Ascension pakai mapId yang SAMA (50001-50020).
- -- Pembeda satu-satunya adalah flag isAscension dari chat parser via entry negatif.
+ -- BossName dari _ASC_CHAT_CACHE (cache bersih dari chat parser, bukan entry negatif)
+ local _prevBossName = _ASC_CHAT_CACHE and _ASC_CHAT_CACHE[mapNum] and _ASC_CHAT_CACHE[mapNum].bossName or nil
+ -- Hapus entry temp negatif jika masih ada (cleanup)
+ if RAID_LIVE[-(mapId)] then RAID_LIVE[-(mapId)] = nil end
+ if _ascCacheKey and RAID_LIVE[_ascCacheKey] then RAID_LIVE[_ascCacheKey] = nil end
  RAID_LIVE[raidId] = {
- raidId = raidId,
- mapId = mapId,
- spawnName = spawnName,
- rank = rank,
- grade = grade,
- isAscension = _prevAsc,
- bossName = _prevBossName,
- endTime = info.endTime,
- label = _prevAsc
-  and ("Ascension Tower "..mapNum..(_prevBossName and (" - "..(_prevBossName:gsub("^%l",string.upper))) or "").." ["..grade.."]")
-  or ("Map "..mapNum.." - "..mapName.." "..rankLbl),
+  raidId = raidId,
+  mapId = mapId,
+  spawnName = spawnName,
+  rank = rank,
+  grade = grade,
+  isAscension = isAscEntry,
+  bossName = _prevBossName,
+  endTime = info.endTime,
+  label = isAscEntry
+   and ("Ascension Tower "..mapNum..(_prevBossName and (" - "..(_prevBossName:gsub("^%l",string.upper))) or "").." ["..grade.."]")
+   or ("Map "..mapNum.." - "..mapName.." "..rankLbl),
  }
 end
 end
@@ -7689,11 +7681,13 @@ ConnectRaidListeners = function()
  local raidId = info.raidId or (type(k)=="number" and k) or tonumber(k)
  local mapId = info.mapId
  if not raidId or not mapId then break end
- -- Normalize mapId ke lobby range
+ -- Normalize mapId ke lobby range (RAID normal)
  if mapId >= 50101 and mapId <= 50120 then mapId = mapId - 100 end
- if mapId < 50001 or mapId > 50020 then break end
+ -- ASC Tower 50301-50326 langsung valid, RAID normal 50001-50020
+ local _isAscMapId = (mapId >= 50301 and mapId <= 50326)
+ if not _isAscMapId and (mapId < 50001 or mapId > 50020) then break end
 
- local mapNum = mapId - 50000
+ local mapNum = _isAscMapId and (mapId - 50300) or (mapId - 50000)
  local spawnName = info.spawnName or "RE1001"
  local rank = SPAWN_RANK[spawnName] or 0
  -- [v271] Grade dari RAID_CONFIG_GRADE (formula matematika, cover semua seri)
@@ -7927,7 +7921,9 @@ local function GetAscensionList()
     -- (server akan reject jika ID tidak valid, dan loop akan retry)
     if resolvedId < 0 then resolvedId = math.abs(resolvedId) end
    end
-   local mn = (ent.mapId or 50000) - 50000
+   -- ASC mapId 50301-50326 -> mapNum 1-26; RAID mapId 50001-50020 -> mapNum 1-20
+   local _mId = ent.mapId or 50000
+   local mn = (_mId >= 50301 and _mId <= 50326) and (_mId - 50300) or (_mId - 50000)
    -- [manual] filter grade jika pickMode manual & ada grade dipilih
    local gradeOk = true
    if ASC.pickMode == "manual" and next(ASC.runeGrades) then
@@ -8250,7 +8246,9 @@ function StartAscensionLoop()
      if not ASC.running then ASC.inMap = false; break end
     end
 
-    -- STEP 1: CreateRaidTeam
+    -- STEP 1: CreateRaidTeam dengan raidId asli dari server
+    -- raidEntry.id sekarang selalu raidId asli (935001+) karena chat parser
+    -- tidak lagi buat entry negatif - entry hanya masuk via EnterRaidsUpdateInfo
     AscStatusUpdate("[~] Create Raid Team...", Color3.fromRGB(100,200,255))
     if RE.CreateRaidTeam then
      pcall(function() RE.CreateRaidTeam:InvokeServer(raidEntry.id) end)
@@ -8258,14 +8256,15 @@ function StartAscensionLoop()
     task.wait(0.3)
     if not ASC.running then ASC.inMap = false; break end
 
-    -- STEP 2: StartChallengeRaidMap (TANPA argumen - confirmed SimpleSPY)
+    -- STEP 2: StartChallengeRaidMap dengan targetMapId (Tower map)
+    -- Sama seperti RAID normal - server butuh mapId untuk tahu mau masuk Tower mana
     local _cfail = false
     local _cfConn
     local _cfRe = Remotes:FindFirstChild("ChallengeRaidsFail")
     if _cfRe then _cfConn = _cfRe.OnClientEvent:Connect(function() _cfail = true end) end
 
     if RE.StartChallengeRaidMap then
-     pcall(function() RE.StartChallengeRaidMap:FireServer() end)
+     pcall(function() RE.StartChallengeRaidMap:FireServer({mapId = targetMapId}) end)
     end
     task.wait(0.3)
     if not ASC.running then
