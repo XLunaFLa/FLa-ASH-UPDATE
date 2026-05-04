@@ -1209,11 +1209,20 @@ ASC = {
 _ascOn = false
 _ascWakeup = nil -- BindableEvent untuk wakeup loop
 _visAscension = nil -- visual pill toggle
+_ascBusy = false -- true selama ASC inMap ATAU cooldown -> RAID pause total
 _ASC_CHAT_CACHE = {} -- [mapNum] = {grade, bossName} dari chat parser; dipakai ParseRaidEntry
 -- [v56 DEPRECATED] _ascDominatedThisEvent tidak dipakai lagi
 -- Logika baru: RAID standby selama ASC.running=true DAN ResolveAscEntry()~=nil
 -- RAID boleh jalan HANYA kalau ResolveAscEntry()=nil (tidak ada Tower match di event saat ini)
 _ascDominatedThisEvent = false -- tetap ada agar tidak crash referensi lama
+
+-- [v61 CYCLEFIX] Tracking siklus event server (~5m5s aktif + ~5m cooldown)
+-- _ascMatchedThisCycle: true jika ASC sudah match/masuk di siklus event ini
+--   -> RAID harus tunggu sampai RAID_LIVE benar-benar kosong (event habis) sebelum boleh jalan
+-- _raidFallbackActive: true jika RAID sedang fallback (ASC tidak match di siklus ini)
+--   -> ASC harus standby, tidak boleh "nyuri" RAID sampai siklus event baru datang dari server
+_ascMatchedThisCycle  = false  -- ASC pernah match di siklus event saat ini
+_raidFallbackActive   = false  -- RAID sedang jalan sebagai fallback (ASC tidak match siklus ini)
 
 -- [v55 FIX] Mapping Ascension Tower: Tower X -> mapId = 50300 + X
 -- Data confirmed: Tower 1=50301, Tower 2=50302, ..., Tower 26=50326
@@ -7295,6 +7304,10 @@ TriggerEntryWakeup = function()
     end
     _entryWakeupTimer = task.delay(_ENTRY_DEBOUNCE_SEC, function()
         _entryWakeupTimer = nil
+        -- [v61 CYCLEFIX] Siklus event BARU dari server tiba -> reset flag siklus lama
+        -- Ini memungkinkan ASC dan RAID masing-masing mengevaluasi ulang siapa yang dominan
+        _ascMatchedThisCycle = false
+        _raidFallbackActive  = false
         -- Data sudah stabil selama 3 detik. Bangunkan RAID dan ASC bersamaan.
         -- Masing-masing akan resolve entry mereka sendiri dan filter sesuai setting user.
         -- TryClaimMapLock menjamin hanya satu yang bisa masuk map dalam satu waktu.
@@ -8167,7 +8180,11 @@ function StartAscensionLoop()
     while ASC.running and not raidEntry do
      local ascList = GetAscensionList()
      local _pm = ASC.pickMode or "easy"
-     if #ascList == 0 then
+     -- [v61 CYCLEFIX] Jika RAID sedang fallback di siklus ini, ASC harus standby
+     -- Tidak boleh masuk Tower sampai siklus event baru datang (TriggerEntryWakeup reset flag)
+     if _raidFallbackActive and RAID.running then
+      AscStatusUpdate("[Standby] RAID fallback aktif siklus ini - tunggu siklus event baru...", Color3.fromRGB(140,80,200))
+     elseif #ascList == 0 then
       if RAID.running then
        AscStatusUpdate("[Standby] Fallback ke Auto Raid - tunggu Ascension Tower...", Color3.fromRGB(140,100,200))
       else
@@ -8196,7 +8213,12 @@ function StartAscensionLoop()
       task.wait(0.1); _we = _we + 0.1
      end
      if _wConn then pcall(function() _wConn:Disconnect() end) end
-     raidEntry = ResolveAscEntry()
+     -- [v61 CYCLEFIX] Jika RAID fallback aktif siklus ini, jangan resolve entry (ASC tetap standby)
+     if _raidFallbackActive and RAID.running then
+      raidEntry = nil  -- paksa tetap standby sampai siklus baru
+     else
+      raidEntry = ResolveAscEntry()
+     end
     end
     if not ASC.running then break end
     if not raidEntry then break end
@@ -8233,6 +8255,9 @@ function StartAscensionLoop()
     AscStatusUpdate("Masuk: Tower "..mn..bossHint.." ["..raidEntry.grade.."]", Color3.fromRGB(100,200,255))
 
     ASC.inMap = true
+    _ascBusy  = true  -- RAID harus pause total selama ASC aktif (inMap+cooldown)
+    _ascMatchedThisCycle = true   -- [v61 CYCLEFIX] ASC sudah match di siklus ini
+    _raidFallbackActive  = false  -- [v61 CYCLEFIX] RAID tidak boleh fallback di siklus ini
     _ascPending = false -- [v57 FIX] inMap=true sudah cover, tidak perlu pending lagi
     -- [v56 FIX] _ascDominatedThisEvent dihapus - RAID dan ASC sekarang independen
     -- [v52 FIX] Setelah inMap=true di-set, lock tidak diperlukan lagi (IsAnyMapActive sudah cover)
@@ -8752,22 +8777,44 @@ function StartAscensionLoop()
        AscStatusUpdate("[!] PAUSE: Menunggu Siege/Dungeon Selesai...", Color3.fromRGB(255,100,100))
       else
        local nextEntry = ResolveAscEntry()
-       if nextEntry then break end  -- ada Tower baru -> lanjut ASC
+       if nextEntry then
+        _ascBusy = true  -- ada Tower baru -> RAID harus pause lagi
+        break
+       end
        -- Tidak ada Tower yang cocok
        if #RAID_ID_LIST == 0 then
-        -- Event habis total -> tunggu event baru
+        -- Event habis total -> RAID boleh jalan, reset cycle flag
+        _ascBusy = false
+        _ascMatchedThisCycle = false  -- [v61 CYCLEFIX] siklus habis, reset
+        _raidFallbackActive  = false
         AscStatusUpdate("[>>] Menunggu event RAID baru dari server...", Color3.fromRGB(120,120,120))
        elseif #GetAscensionList() > 0 then
         -- Ada Ascension tapi tidak cocok filter (grade/map)
-        AscStatusUpdate("[FLa] Waiting grade filter... (".._fw.."s)", Color3.fromRGB(200,255,150))
+        -- [v61 CYCLEFIX] Jika ASC pernah match di siklus ini, pertahankan _ascBusy
+        -- sampai siklus event benar-benar habis (RAID_LIVE kosong)
+        if _ascMatchedThisCycle then
+         _ascBusy = true  -- siklus ASC belum selesai, RAID tetap pause
+         AscStatusUpdate("[||] ASC cycle aktif - RAID standby sampai event habis (".._fw.."s)", Color3.fromRGB(180,100,255))
+        else
+         AscStatusUpdate("[FLa] Waiting grade filter... (".._fw.."s)", Color3.fromRGB(200,255,150))
+        end
        else
         -- Tidak ada Ascension, tapi masih ada Raid Normal di event ini
-        -- Jika RAID.running ON -> fallback boleh jalan (dihandle di RAID loop, ASC standby saja)
-        if RAID.running then
-         AscStatusUpdate("[Standby] Fallback ke Auto Raid (".._fw.."s)", Color3.fromRGB(140,100,200))
+        -- [v61 CYCLEFIX] Jika ASC sudah dominasi siklus ini (pernah match),
+        -- pertahankan _ascBusy sampai RAID_LIVE kosong (siklus habis)
+        if _ascMatchedThisCycle then
+         _ascBusy = true  -- siklus ASC belum habis, RAID tetap pause
+         AscStatusUpdate("[||] Menunggu siklus event habis - RAID standby (".._fw.."s)", Color3.fromRGB(180,100,255))
         else
-         -- RAID OFF -> diam saja sampai event baru
-         AscStatusUpdate("[FLa] Waiting Ascension Tower... (".._fw.."s)", Color3.fromRGB(160,120,60))
+         -- ASC tidak pernah match di siklus ini -> lepas _ascBusy, RAID boleh fallback
+         _ascBusy = false
+         _raidFallbackActive = true  -- [v61 CYCLEFIX] tandai RAID sedang fallback
+         if RAID.running then
+          AscStatusUpdate("[Standby] Fallback ke Auto Raid (".._fw.."s)", Color3.fromRGB(140,100,200))
+         else
+          -- RAID OFF -> diam saja sampai event baru
+          AscStatusUpdate("[FLa] Waiting Ascension Tower... (".._fw.."s)", Color3.fromRGB(160,120,60))
+         end
         end
        end
       end
@@ -8791,8 +8838,11 @@ function StartAscensionLoop()
 
   ASC.running = false
   ASC.inMap   = false
+  _ascBusy    = false
   _ascOn      = false
   _ascDominatedThisEvent = false -- [v56 DEPRECATED] tidak dipakai lagi
+  _ascMatchedThisCycle  = false  -- [v61 CYCLEFIX] reset saat ASC stop
+  _raidFallbackActive   = false  -- [v61 CYCLEFIX] reset saat ASC stop
   ASC._rrIdx  = 0
   AscStatusUpdate("Auto Ascension STOP", Color3.fromRGB(160,148,135))
   if ASC.dot then ASC.dot.BackgroundColor3 = Color3.fromRGB(100,100,100) end
@@ -9131,17 +9181,20 @@ function StartRaidLoop()
  -- ASC: RAID boleh lolos guard HANYA jika ResolveAscEntry() = nil (tidak ada Tower match)
  -- Jika ASC.inMap = true (di Tower) -> tetap tunggu ASC keluar dulu sebelum cek ResolveAscEntry
  do
+  -- RAID pause selama _ascBusy=true (ASC sedang inMap atau cooldown)
+  -- _ascBusy diset false oleh ASC hanya saat benar-benar tidak ada Tower lagi
   local _rGuard = 0
   while RAID.running and _rGuard < 90 do
+   -- Cek ASC busy dulu (prioritas)
+   if ASC and ASC.running and _ascBusy then
+    RaidStatusUpdate("[||] ASC aktif - RAID standby...", Color3.fromRGB(180,100,255))
+    task.wait(0.5); _rGuard = _rGuard + 0.5
+    continue
+   end
+   -- Cek fitur lain (Siege, Dungeon)
    local _busy, _who = IsAnyMapActive()
    local _selfBusy = (_who == "raid")
    if not _busy or _selfBusy then break end
-   -- Kalau yang aktif adalah ASC: cek dulu apakah masih ada Tower match
-   -- Jika tidak ada Tower match lagi, RAID boleh lolos meski ASC.inMap masih true
-   if _who == "asc" then
-    if not (ResolveAscEntry and ResolveAscEntry()) then break end -- tidak ada match, RAID boleh jalan
-   end
-   RAID.inMap = false
    RaidStatusUpdate("[||] Tunggu "..(_who or "?").." selesai dulu...", Color3.fromRGB(255,140,0))
    task.wait(0.5); _rGuard = _rGuard + 0.5
   end
@@ -9491,7 +9544,10 @@ local function ResolveEntry()
          task.wait(1)
          break
      end
-     -- ResolveAscEntry() = nil -> tidak ada Tower match -> RAID boleh jalan
+     -- ResolveAscEntry() = nil -> tidak ada Tower match -> RAID boleh jalan sebagai fallback
+     -- [v61 CYCLEFIX] Tandai bahwa RAID jalan sebagai fallback di siklus ini
+     -- ASC harus standby dan tidak boleh mencuri sampai siklus baru datang
+     _raidFallbackActive = true
  end
 
  local currentWm = workspace:GetAttribute("MapId") or 0
@@ -10302,13 +10358,8 @@ local function ResolveEntry()
             if (mapId >= 50201 and mapId <= 50204) or mapId == 50303 then
                 isBusy = true
             end
-            -- [v56 FIX] RAID standby selama ASC.running=true DAN ResolveAscEntry() ~= nil
-            -- Tidak pakai ASC.inMap - karena saat ASC cooldown pun kalau masih ada Tower match, RAID tetap standby
-            local _ascBlocking = false
-            if ASC and ASC.running then
-                local _ascEntry2 = ResolveAscEntry and ResolveAscEntry()
-                if _ascEntry2 then _ascBlocking = true end
-            end
+            -- RAID standby selama _ascBusy=true (ASC inMap atau cooldown dengan Tower tersedia)
+            local _ascBlocking = ASC and ASC.running and _ascBusy
 
             if isBusy or _ascBlocking then
                 if _ascBlocking then
@@ -10349,6 +10400,7 @@ local function ResolveEntry()
  RAID.running = false
  RAID.inMap = false
  _raidOn = false
+ _raidFallbackActive = false  -- [v61 CYCLEFIX] reset saat RAID stop
  MODE:Release("raid") -- [v257] pastikan MA bisa resume
  RaidStatusUpdate("[FLa] Auto Raid STOP", Color3.fromRGB(160,148,135))
  if RAID.dot then RAID.dot.BackgroundColor3 = Color3.fromRGB(100,100,100) end
