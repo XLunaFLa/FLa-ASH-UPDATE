@@ -8464,8 +8464,8 @@ function StartAscensionLoop()
        end)
       end
       if not boss then
-       AscStatusUpdate("Find Boss... ("..math.floor(waitBoss).."s/40s)", Color3.fromRGB(160,148,135))
-       task.wait(0.3); waitBoss = waitBoss + 0.3
+       AscStatusUpdate("Find Boss... ("..math.floor(waitBoss).."s/5s)", Color3.fromRGB(160,148,135))
+       task.wait(1); waitBoss = waitBoss + 1
       end
      end
      for _, c in ipairs(_bossEventConns) do pcall(function() c:Disconnect() end) end
@@ -9951,8 +9951,8 @@ local function ResolveEntry()
  if IsBossWithHint(e.model.Name) then boss = e; break end
  end
  if not boss then
- RaidStatusUpdate("Find Boss... (" .. math.floor(waitBoss) .. "s/30s)", Color3.fromRGB(160,148,135))
- task.wait(0.3); waitBoss = waitBoss + 0.3
+ RaidStatusUpdate("Find Boss... (" .. math.floor(waitBoss) .. "s/5s)", Color3.fromRGB(160,148,135))
+ task.wait(1); waitBoss = waitBoss + 1
  end
  end
 
@@ -12527,7 +12527,7 @@ StartSiegeLoop = function()
                     
                     -- [FIX v39] Timeout diperbesar: 1s -> 5s (Map 7/10/13 butuh lebih lama load)
                     local tpWait = 0
-                    while tpWait < 5 and SIEGE.running do
+                    while tpWait < 1 and SIEGE.running do
                         task.wait(0.5); tpWait = tpWait + 0.5
                         local curMap = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
                         if curMap == baseMapId then break end
