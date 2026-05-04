@@ -1423,6 +1423,10 @@ function GetEnemiesLocal()
     if e:IsA("Model") then
      local g = e:GetAttribute("EnemyGuid") or e:GetAttribute("BossGuid") or e:GetAttribute("Guid") or e:GetAttribute("GUID")
      local h = e:FindFirstChild("HumanoidRootPart")
+           or e.PrimaryPart
+           or e:FindFirstChild("Torso")
+           or e:FindFirstChild("UpperTorso")
+           or e:FindFirstChildWhichIsA("BasePart")
      local hum = e:FindFirstChildOfClass("Humanoid")
      if g and h and hum and hum.Health > 0 and not seen[g] then
       seen[g] = true
@@ -1438,6 +1442,10 @@ function GetEnemiesLocal()
    if obj:IsA("Model") then
     local g = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid") or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
     local h = obj:FindFirstChild("HumanoidRootPart")
+          or obj.PrimaryPart
+          or obj:FindFirstChild("Torso")
+          or obj:FindFirstChild("UpperTorso")
+          or obj:FindFirstChildWhichIsA("BasePart")
     local hum = obj:FindFirstChildOfClass("Humanoid")
     if g and h and hum and hum.Health > 0 and not seen[g] then
      seen[g] = true
@@ -8874,7 +8882,13 @@ function GetRaidEnemies()
  if not e:IsA("Model") then return end
  local g = e:GetAttribute("EnemyGuid") or e:GetAttribute("BossGuid") or e:GetAttribute("Guid") or e:GetAttribute("GUID")
  if not g or seen[g] then return end
+ -- Fallback: beberapa boss (Giant Arachnid, dll) tidak punya HumanoidRootPart
+ -- Coba HumanoidRootPart -> PrimaryPart -> Torso -> UpperTorso -> bagian apapun
  local hrp = e:FindFirstChild("HumanoidRootPart")
+       or e.PrimaryPart
+       or e:FindFirstChild("Torso")
+       or e:FindFirstChild("UpperTorso")
+       or e:FindFirstChildWhichIsA("BasePart")
  local hum = e:FindFirstChildOfClass("Humanoid")
  if not (hrp and hum and hum.Health > 0) then return end
  if useDistFilter then
@@ -9892,6 +9906,10 @@ local function ResolveEntry()
  if IsBossWithHint(obj.Name) then
  local g = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid") or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
  local hrp = obj:FindFirstChild("HumanoidRootPart")
+       or obj.PrimaryPart
+       or obj:FindFirstChild("Torso")
+       or obj:FindFirstChild("UpperTorso")
+       or obj:FindFirstChildWhichIsA("BasePart")
  local hum = obj:FindFirstChildOfClass("Humanoid")
  if g and hrp and hum and hum.Health > 0 then
  boss = {guid=g, hrp=hrp, model=obj}
