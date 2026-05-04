@@ -8230,106 +8230,69 @@ function StartAscensionLoop()
     -- [v52 FIX] Setelah inMap=true di-set, lock tidak diperlukan lagi (IsAnyMapActive sudah cover)
     ReleaseMapLock("asc")
 
-    -- [v55] targetMapId langsung dari mapNum: Tower X -> 50300 + X
-    -- Tidak lagi bergantung nama boss (bossName bisa nil atau berubah)
-    -- targetMapId = 50301-50326 (map dalam Tower, sesuai nomor Tower yg dipilih Pick Mode)
-    -- baseMapId   = 50000 + mapNum (lobby map sesuai Tower)
-    local targetMapId = ResolveAscTargetMapId(mn)  -- mn = mapNum dari Pick Mode
-    local baseMapId   = 50000 + mn
-    AscStatusUpdate("Join: Tower "..mn.." -> lobby "..baseMapId.." -> tower "..targetMapId, Color3.fromRGB(100,200,255))
+    -- Entry ASC = identik RAID normal, beda hanya mapId:
+    -- RAID: StartChallengeRaidMap({mapId = raidEntry.mapId + 100}) → 50001+100 = 50101-50120
+    -- ASC : StartChallengeRaidMap({mapId = 50300+mn})              → Tower X = 50301-50326
+    -- Pakai ResolveAscTargetMapId(mn) agar selalu 50300+mn - tidak bergantung mapId dari server
+    local targetMapId = ResolveAscTargetMapId(mn)  -- 50300+mn, confirmed formula
+    local mn_label = mn  -- Tower number untuk display
 
-    -- [v54] STEP 0: TP ke BaseMapId (lobby map sesuai Pick Mode) sebelum CreateRaidTeam
-    -- Ini diperlukan agar server menerima request join dengan benar
-    do
-     AscStatusUpdate("[~] TP ke lobby Map "..mn.."...", Color3.fromRGB(180,180,255))
-     pcall(function() RE.LocalTp:FireServer({ mapId = baseMapId }) end)
-     -- Tunggu konfirmasi MapId berubah ke baseMapId (max 8s)
-     local _bWait = 0
-     local _bOk = false
-     while not _bOk and _bWait < 8 and ASC.running do
-      task.wait(0.3); _bWait = _bWait + 0.3
-      pcall(function()
-       local wm = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId")
-       if wm and wm == baseMapId then _bOk = true end
-      end)
-     end
-     -- Kalau masih belum sampai, fire sekali lagi sebagai retry
-     if not _bOk and ASC.running then
-      pcall(function() RE.LocalTp:FireServer({ mapId = baseMapId }) end)
-      task.wait(0.5)
-     end
-     if not ASC.running then ASC.inMap = false; break end
-    end
+    AscStatusUpdate("[~] Enter Tower "..mn_label.."...", Color3.fromRGB(100,200,255))
 
-    -- STEP 1: CreateRaidTeam dengan raidId asli dari server
-    -- raidEntry.id sekarang selalu raidId asli (935001+) karena chat parser
-    -- tidak lagi buat entry negatif - entry hanya masuk via EnterRaidsUpdateInfo
-    AscStatusUpdate("[~] Create Raid Team...", Color3.fromRGB(100,200,255))
+    -- Sama persis RAID: CreateRaidTeam(raidId)
     if RE.CreateRaidTeam then
      pcall(function() RE.CreateRaidTeam:InvokeServer(raidEntry.id) end)
     end
-    task.wait(0.3)
+    task.wait(0.2)
     if not ASC.running then ASC.inMap = false; break end
 
-    -- STEP 2: StartChallengeRaidMap TANPA argumen (confirmed SimpleSPY)
-    -- ASC berbeda dari RAID normal: server handle routing via raidId (935001+) yang sudah di-set
-    -- di CreateRaidTeam. mapId tidak diperlukan di sini.
+    -- Sama persis RAID: StartChallengeRaidMap({mapId=targetMapId})
     local _cfail = false
     local _cfConn
     local _cfRe = Remotes:FindFirstChild("ChallengeRaidsFail")
     if _cfRe then _cfConn = _cfRe.OnClientEvent:Connect(function() _cfail = true end) end
 
     if RE.StartChallengeRaidMap then
-     pcall(function() RE.StartChallengeRaidMap:FireServer() end)
-    end
-    task.wait(0.3)
-    if not ASC.running then
-     if _cfConn then pcall(function() _cfConn:Disconnect() end) end
-     ASC.inMap = false; break
+     pcall(function() RE.StartChallengeRaidMap:FireServer({mapId = targetMapId}) end)
     end
 
-    -- STEP 3: StartLocalPlayerTeleport + LocalPlayerTeleportSuccess
-    -- Pattern sama dengan DUNGEON (confirmed working):
-    -- StartLocalPlayerTeleport -> wait 0.3 -> LocalPlayerTeleportSuccess (konfirmasi ke server)
-    -- Tanpa LocalPlayerTeleportSuccess server tidak tahu TP diterima -> player stuck di lobby
-    AscStatusUpdate("[~] TP ke Tower "..mn.."...", Color3.fromRGB(100,200,255))
-    if RE.StartLocalPlayerTeleport then
-     pcall(function() RE.StartLocalPlayerTeleport:FireServer({hostId=LP.UserId, mapId=targetMapId}) end)
-    end
-    task.wait(0.3)
-    do
-     local _ltpSucc = Remotes:FindFirstChild("LocalPlayerTeleportSuccess")
-     if _ltpSucc then task.spawn(function() pcall(function() _ltpSucc:InvokeServer() end) end) end
-    end
-
-    -- Tunggu masuk map Ascension Tower (range 50301-50326)
-    -- Tunggu masuk Tower (max 10s) - flow sama persis v41
-    local _tpOk = false
-    local _tpW  = 0
-    while not _tpOk and _tpW < 10 and ASC.running and not _cfail do
-     task.wait(0.3); _tpW = _tpW + 0.3
-     pcall(function()
-      local wm = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId")
-      if wm and wm >= 50301 and wm <= 50326 then _tpOk = true end
-     end)
-     -- Fallback: kalau enemy sudah ada, berarti sudah di dalam Tower
-     if not _tpOk and #GetRaidEnemies() > 0 then _tpOk = true end
-     if not _tpOk then
-      AscStatusUpdate("[~] Waiting Tower... (" .. string.format("%.0f", _tpW) .. "s/10s)", Color3.fromRGB(180,100,255))
-     end
+    -- Tunggu serverMapId (max 5s) - sama persis RAID
+    local _w2 = 0
+    while RAID.serverMapId == nil and _w2 < 5 and ASC.running and not _cfail do
+     task.wait(0.05); _w2 = _w2 + 0.05
     end
     if _cfConn then pcall(function() _cfConn:Disconnect() end) end
 
-    if not _tpOk or _cfail then
-     -- Gagal masuk Tower: hapus entry dan retry
-     if RAID_LIVE and raidEntry then
-      RAID_LIVE[raidEntry.rawId] = nil
-      if raidEntry.rawId ~= raidEntry.id then RAID_LIVE[raidEntry.id] = nil end
-      if RebuildRaidList then pcall(RebuildRaidList) end
-     end
-     ASC.inMap = false
-     ReleaseMapLock("asc")
-     AscStatusUpdate("Gagal masuk Tower - retry...", Color3.fromRGB(255,80,80))
+    if _cfail then
+     RAID_LIVE[raidEntry.rawId] = nil
+     if raidEntry.rawId ~= raidEntry.id then RAID_LIVE[raidEntry.id] = nil end
+     if RebuildRaidList then pcall(RebuildRaidList) end
+     ASC.inMap = false; ReleaseMapLock("asc")
+     AscStatusUpdate("[!] Server reject (ChallengeRaidsFail) - retry...", Color3.fromRGB(255,80,80))
+     task.wait(1); break
+    end
+
+    -- Tunggu masuk Tower (max 10s) - sama persis RAID tapi cek range 50301-50326
+    AscStatusUpdate("[~] Waiting Tower "..mn_label.."...", Color3.fromRGB(180,100,255))
+    local _tpOk = false
+    local _tpW  = 0
+    while not _tpOk and _tpW < 10 and ASC.running do
+     task.wait(0.3); _tpW = _tpW + 0.3
+     pcall(function()
+      local wm = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
+      if wm then
+       if wm >= 50301 and wm <= 50326 then _tpOk = true end
+      end
+     end)
+     if not _tpOk and #GetRaidEnemies() > 0 then _tpOk = true end
+    end
+
+    if not _tpOk and ASC.running then
+     RAID_LIVE[raidEntry.rawId] = nil
+     if raidEntry.rawId ~= raidEntry.id then RAID_LIVE[raidEntry.id] = nil end
+     if RebuildRaidList then pcall(RebuildRaidList) end
+     ASC.inMap = false; ReleaseMapLock("asc")
+     AscStatusUpdate("[!] Gagal masuk Tower - retry...", Color3.fromRGB(255,80,80))
      task.wait(1); break
     end
 
