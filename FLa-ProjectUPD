@@ -2895,7 +2895,7 @@ PGR100.Loop = function(msi)
     end
 
     if #stopIds == 0 then
-      setStatus100("[!] SELECT TARGET PLEASE!", Color3.fromRGB(255,100,60))
+      setStatus100("[!] TARGET UNSELECT PLEASE!", Color3.fromRGB(255,100,60))
       setOff100()
       return
     end
@@ -5532,7 +5532,7 @@ do
 
  local tDdBtn = Btn(tRow, C.DD_BG, UDim2.new(1,-108,0,24))
  tDdBtn.Position=UDim2.new(0,100,0.5,-12); Corner(tDdBtn,5); Stroke(tDdBtn,C.BORD2, 1.5,0.85)
- local tDdLbl = Label(tDdBtn,"-- SELECT TARGET --",10,C.TXT2,Enum.Font.GothamBold,Enum.TextXAlignment.Left)
+ local tDdLbl = Label(tDdBtn,"-- TARGET UNSELECT --",10,C.TXT2,Enum.Font.GothamBold,Enum.TextXAlignment.Left)
  tDdLbl.Size=UDim2.new(1,-20,1,0); tDdLbl.Position=UDim2.new(0,7,0,0)
  tDdLbl.TextTruncate=Enum.TextTruncate.AtEnd
  local tArrow = Label(tDdBtn,"v",9,C.ACC,Enum.Font.GothamBold,Enum.TextXAlignment.Center)
@@ -5550,7 +5550,7 @@ do
  table.insert(names, q.name)
  end
  end
- tDdLbl.Text = #names > 0 and table.concat(names," / ") or "-- SELECT TARGET --"
+ tDdLbl.Text = #names > 0 and table.concat(names," / ") or "-- TARGET UNSELECT --"
  tDdLbl.TextColor3 = #names > 0 and C.ACC2 or C.TXT2
  end,
  })
@@ -6157,7 +6157,7 @@ do
  local mDot = Frame(statRow, Color3.fromRGB(100,100,100), UDim2.new(0,8,0,8))
  mDot.Position = UDim2.new(0,7,0.5,-4); Corner(mDot,4)
  ORN.dotRefs[mi] = mDot
- local mStLbl = Label(statRow,"Idle - SELECT TARGET & ENABLE",10,C.TXT2,Enum.Font.GothamBold)
+ local mStLbl = Label(statRow,"Idle - TARGET UNSELECT & ENABLE",10,C.TXT2,Enum.Font.GothamBold)
  mStLbl.Size = UDim2.new(1,-22,1,0); mStLbl.Position = UDim2.new(0,21,0,0)
  mStLbl.TextTruncate = Enum.TextTruncate.AtEnd
  ORN.statLbls[mi] = mStLbl
@@ -10976,7 +10976,7 @@ do
  -- Dropdown Target Grade
  local gradeDDBtn = Btn(udRowBot, C.BG3, UDim2.new(0.55, -4, 1, -4))
  gradeDDBtn.Position = UDim2.new(0.45,8,0,2); Corner(gradeDDBtn,6); Stroke(gradeDDBtn,C.BORD, 1.5,0.2)
- local gradeDDLbl = Label(gradeDDBtn, RAID.updownTargetGrade and (" Target: ["..RAID.updownTargetGrade.."]") or " -- SELECT TARGET --", 11, RAID.updownTargetGrade and C.ACC2 or C.TXT3, Enum.Font.GothamBold)
+ local gradeDDLbl = Label(gradeDDBtn, RAID.updownTargetGrade and (" Target: ["..RAID.updownTargetGrade.."]") or " -- TARGET UNSELECT --", 11, RAID.updownTargetGrade and C.ACC2 or C.TXT3, Enum.Font.GothamBold)
  gradeDDLbl.Size = UDim2.new(1,-16,1,0)
  local gradeArr = Label(gradeDDBtn,"v",10,C.TXT3,Enum.Font.GothamBold,Enum.TextXAlignment.Center)
  gradeArr.Size = UDim2.new(0,16,1,0); gradeArr.Position = UDim2.new(1,-16,0,0)
@@ -11075,7 +11075,7 @@ do
     cLbl.TextXAlignment = Enum.TextXAlignment.Left; cLbl.ZIndex = 9999
     cRow.MouseButton1Click:Connect(function()
         RAID.updownTargetGrade = nil
-        gradeDDLbl.Text = " -- SELECT TARGET --"
+        gradeDDLbl.Text = " -- TARGET UNSELECT --"
         gradeDDLbl.TextColor3 = C.TXT3
         CloseActiveDD()
     end)
@@ -11257,7 +11257,7 @@ do
   RAID.updownEnabled = false; RAID.updownDir = "up"; RAID.updownTargetGrade = nil
   pcall(updateUpDownToggle)
   pcall(function() dirDDLbl.Text = " UP (UP)"; dirDDLbl.TextColor3 = Color3.fromRGB(100,220,100) end)
-  pcall(function() gradeDDLbl.Text = " -- SELECT TARGET --"; gradeDDLbl.TextColor3 = C.TXT3 end)
+  pcall(function() gradeDDLbl.Text = " -- TARGET UNSELECT --"; gradeDDLbl.TextColor3 = C.TXT3 end)
   RAID.autoKillBoss = false
   TweenService:Create(bPill, TweenInfo.new(0.18, Enum.EasingStyle.Quad), {BackgroundColor3=C.PILL_OFF}):Play()
   TweenService:Create(bKnob, TweenInfo.new(0.16), {Position=UDim2.new(0,3,0.5,0), BackgroundColor3=C.KNOB_OFF}):Play()
@@ -11646,7 +11646,7 @@ do
  local ascGradeDDBtn = Btn(ascUdRowBot,C.BG3,UDim2.new(1,-120,0,26))
  ascGradeDDBtn.LayoutOrder=2; Corner(ascGradeDDBtn,6); Stroke(ascGradeDDBtn,C.BORD,1.5,0.25)
  local ascGradeDDLbl = Label(ascGradeDDBtn,
-  ASC.updownTargetGrade and (" Target: ["..ASC.updownTargetGrade.."]") or " -- SELECT TARGET --",
+  ASC.updownTargetGrade and (" Target: ["..ASC.updownTargetGrade.."]") or " -- TARGET UNSELECT --",
   11,ASC.updownTargetGrade and C.ACC2 or C.TXT3,Enum.Font.GothamBold)
  ascGradeDDLbl.Size=UDim2.new(1,-20,1,0)
  local ascGradeArr = Label(ascGradeDDBtn,"v",10,C.TXT3,Enum.Font.GothamBold,Enum.TextXAlignment.Center)
@@ -11730,7 +11730,7 @@ do
   cLbl.TextXAlignment=Enum.TextXAlignment.Left; cLbl.ZIndex=9999
   cRow.MouseButton1Click:Connect(function()
    ASC.updownTargetGrade=nil; CloseActiveDD()
-   ascGradeDDLbl.Text=" -- SELECT TARGET --"; ascGradeDDLbl.TextColor3=C.TXT3
+   ascGradeDDLbl.Text=" -- TARGET UNSELECT --"; ascGradeDDLbl.TextColor3=C.TXT3
   end)
   for i,g in ipairs(gl) do
    local selGrade=g; local col=GRADE_COLORS_ASC[g] or C.ACC; local isSel=(ASC.updownTargetGrade==g)
@@ -15590,7 +15590,7 @@ do
  local hasTarget = false
  for _ in pairs(targets) do hasTarget = true; break end
  if not hasTarget then
- setSlot("[!] SELECT TARGET PLEASE!", Color3.fromRGB(255,100,60))
+ setSlot("[!] TARGET UNSELECT PLEASE!", Color3.fromRGB(255,100,60))
  task.wait(1); break
  end
 
@@ -15675,8 +15675,8 @@ do
 
  -- [FIX DEBUG] Tampilkan raw ID jika tidak dikenal di QUIRK_MAP
  if not hit and _rawId and not QUIRK_MAP[_rawId] then
- setSlot("[DBG] UnknownID:"..tostring(_rawId).." #"..attempt, Color3.fromRGB(200,150,255))
- task.wait(0.3); break
+ setSlot("[ROLL]"..tostring(_rawId).." #"..attempt, Color3.fromRGB(200,150,255))
+ task.wait(0.5); break
  end
 
  if hit then
@@ -15772,7 +15772,7 @@ do
  for _ in pairs(targets) do hasTarget = true; break end
  -- Wajib ada target sebelum roll
  if not hasTarget then
- setSlot("[!] SELECT TARGET PLEASE!", Color3.fromRGB(255,100,60))
+ setSlot("[!] TARGET UNSELECT!", Color3.fromRGB(255,100,60))
  task.wait(1); break
  end
 
@@ -15841,8 +15841,8 @@ do
 
  -- [FIX DEBUG] Tampilkan raw ID jika tidak dikenal di W_QUIRK_MAP
  if not hit and _rawId and not W_QUIRK_MAP[_rawId] then
- setSlot("[DBG] UnknownID:"..tostring(_rawId).." #"..attempt, Color3.fromRGB(200,150,255))
- task.wait(0.3); break
+ setSlot("[ROLL]:"..tostring(_rawId).." #"..attempt, Color3.fromRGB(200,150,255))
+ task.wait(0.5); break
  end
 
  if hit then
@@ -15950,7 +15950,7 @@ do
  local hasTarget = false
  for _ in pairs(PGR.targets[si]) do hasTarget = true; break end
  if not hasTarget then
- setStatus("[!] SELECT TARGET PLEASE!", Color3.fromRGB(255,100,60))
+ setStatus("[!] TARGET UNSELECT PLEASE!", Color3.fromRGB(255,100,60))
  task.wait(1); break
  end
 
@@ -16048,7 +16048,7 @@ do
  for _ in pairs(PGR.targets[si]) do hasTarget = true; break end
  if not hasTarget then
  if PGR.statLbls[si] then
- PGR.statLbls[si].Text = "SELECT TARGET PLEASE!"
+ PGR.statLbls[si].Text = "TARGET UNSELECT PLEASE!"
  PGR.statLbls[si].TextColor3 = Color3.fromRGB(255,100,60)
  end
  -- Tetap jalankan slot, dia akan loop tunggu target
