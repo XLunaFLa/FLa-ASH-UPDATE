@@ -2965,13 +2965,24 @@ PGR100.Loop = function(msi)
           end
         end
 
-        local hit = gotId and PGR.targets[msi][gotId] == true
+        -- [v69-FIX] Deteksi server berhenti karena target (fallback bila gotId nil)
+        local serverStopped = false
+        if type(res) == "table" then
+          serverStopped = res.stopped == true
+                       or res.found == true
+                       or res.targetFound == true
+                       or res.isStop == true
+                       or (type(res.count) == "number" and res.count < 100)
+                       or (type(res.rollCount) == "number" and res.rollCount < 100)
+        end
+        -- [v69-FIX] cek live dari PGR.targets[msi] bukan snapshot lama
+        local hit = (gotId and PGR.targets[msi][gotId] == true) or serverStopped
 
         if hit then
           -- TARGET FOUND - notifikasi sama seperti Fastroll
+          local gradeName = PG_GRADE_MAP[gotId] or (serverStopped and "TARGET" or "?")
           setStatus100("[!] Target SUCCES! (100x #"..attempt..")", Color3.fromRGB(80,255,120))
           if PGR100.lastLbls[msi] then
-            local gradeName = PG_GRADE_MAP[gotId] or "?"
             PGR100.lastLbls[msi].Text = "Last: "..gradeName.." - TARGET!"
           end
           setOff100()
@@ -15778,7 +15789,8 @@ do
 
  LOOPS_HR[si] = task.spawn(function()
  local attempt = 0
- while true do
+ -- [v69-FIX] ganti while true -> cek flag running agar stop deterministik
+ while _HR_RPT and _HR_RPT.running do
  repeat
  -- Cek GUID tersedia
  if not (_HR_RPT and _HR_RPT.guid and _HR_RPT.guid ~= "") then
@@ -15961,7 +15973,8 @@ do
 
  LOOPS_WR[si] = task.spawn(function()
  local attempt = 0
- while true do
+ -- [v69-FIX] ganti while true -> cek flag running agar stop deterministik
+ while _WR_RPT and _WR_RPT.running do
  repeat
  if not (_WR_RPT and _WR_RPT.guid and _WR_RPT.guid ~= "") then
  setSlot("[..] Click 1x on Reroll Machine", Color3.fromRGB(255,150,50))
@@ -16201,7 +16214,8 @@ do
  end
 
  -- [v103] Hanya stop kalau target dipilih DAN hasil cocok
- local hit = gotId and hasTarget and PGR.targets[si][gotId] == true
+ -- [v69-FIX] cek live dari PGR.targets[si] bukan snapshot hasTarget lama
+ local hit = gotId and PGR.targets[si][gotId] == true
 
  if hit then
  setStatus("[!] Target SUCCES! (#"..attempt..")", Color3.fromRGB(80,255,120))
@@ -16212,7 +16226,8 @@ do
  PGR.enOnFlags[si] = false
  if PGR.toggleBtns[si] then PGR.toggleBtns[si].BackgroundColor3 = C.BG3 end
  if PGR.toggleKnobs[si] then PGR.toggleKnobs[si].Position = UDim2.new(0,2,0.5,-9) end
- break
+ LOOPS_PG[si] = nil -- [v69-FIX] bersihkan referensi thread
+ return             -- [v69-FIX] ganti break->return agar langsung keluar coroutine
  else
  setStatus("[OK] Roll #"..attempt.." DONE", Color3.fromRGB(80,180,80))
  if PGR.lastLbls[si] then
