@@ -7325,12 +7325,13 @@ TriggerEntryWakeup = function()
         -- ============================================================
         local _hasAscEntry = false
         if ASC and ASC.running then
-            for _, ent in pairs(RAID_LIVE) do
-                local ridAbs = 0
-                if ent._rawId then ridAbs = ent._rawId < 0 and math.abs(ent._rawId) or ent._rawId end
-                local isAscById = ridAbs >= 935001
+            for rid, ent in pairs(RAID_LIVE) do
+                -- rid adalah raidId integer (key tabel RAID_LIVE)
+                local ridAbs = rid < 0 and math.abs(rid) or rid
+                local isAscById  = ridAbs >= 935001
                 local isAscByMap = ent.mapId and ent.mapId >= 50301 and ent.mapId <= 50326
-                if ent.isAscension == true or isAscById or isAscByMap then
+                local isAscByFlag = ent.isAscension == true
+                if isAscByFlag or isAscById or isAscByMap then
                     _hasAscEntry = true; break
                 end
             end
@@ -7740,7 +7741,23 @@ ConnectRaidListeners = function()
  if mapId >= 50101 and mapId <= 50120 then mapId = mapId - 100 end
  -- ASC Tower 50301-50326 langsung valid, RAID normal 50001-50020
  local _isAscMapId = (mapId >= 50301 and mapId <= 50326)
- if not _isAscMapId and (mapId < 50001 or mapId > 50020) then break end
+ -- [v63 FIX] raidId >= 935001 = pasti ASC Tower meskipun mapId di luar range normal
+ -- Jangan buang entry ini hanya karena mapId tidak dikenali
+ local _isAscById = (raidId >= 935001)
+ if not _isAscMapId and not _isAscById and (mapId < 50001 or mapId > 50020) then break end
+ -- Normalize mapId ASC jika datang sebagai in-map range (50401-50426 -> 50301-50326)
+ if _isAscById and not _isAscMapId then
+  if mapId >= 50401 and mapId <= 50426 then mapId = mapId - 100 end
+  if mapId >= 50201 and mapId <= 50226 then mapId = mapId - 100 + 100 end -- safety
+  -- Jika masih tidak dikenali, paksa ke range ASC yang valid berdasarkan mapNum estimasi
+  if not (mapId >= 50301 and mapId <= 50326) then
+   -- Fallback: coba parse mapNum dari data lain, default ke Tower 1
+   local _mn = math.max(1, math.min(26, mapId - 50300))
+   if _mn < 1 or _mn > 26 then _mn = 1 end
+   mapId = 50300 + _mn
+  end
+  _isAscMapId = true
+ end
 
  local mapNum = _isAscMapId and (mapId - 50300) or (mapId - 50000)
  local spawnName = info.spawnName or "RE1001"
@@ -8170,6 +8187,7 @@ function StartAscensionLoop()
  end
 
  ASC.thread = task.spawn(function()
+  pcall(function()
   while ASC.running do
    repeat
 
@@ -8875,7 +8893,9 @@ function StartAscensionLoop()
 
    until true
   end -- while ASC.running
+  end) -- pcall
 
+  -- [v63 FIX] Cleanup dijamin jalan meskipun pcall catch error di dalam loop
   ASC.running = false
   ASC.inMap   = false
   _ascBusy    = false
@@ -9189,6 +9209,7 @@ function StartRaidLoop()
  RaidStatusUpdate("Siap. Menunggu raid...", Color3.fromRGB(180,180,60))
 
  RAID.thread = task.spawn(function()
+ pcall(function()
  while RAID.running do
  repeat
 
@@ -10437,7 +10458,9 @@ local function ResolveEntry()
 
  until true
  end -- while RAID.running
+ end) -- pcall
 
+ -- [v63 FIX] Cleanup dijamin jalan meskipun ada Lua error di dalam loop
  _raidInterrupt = false
  RAID.running = false
  RAID.inMap = false
