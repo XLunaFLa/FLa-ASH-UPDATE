@@ -1193,8 +1193,8 @@ ASC = {
  pickMode = "easy",   -- "easy" | "hard" | "default" | "byrank" | "bymap" | "manual"
  preferMaps    = {},    -- [v48] map filter (mapNum -> true), sama seperti RAID.preferMaps
  runeGrades    = {},    -- filter grade (Preferred Rank)
- runeEnabled   = false, -- rune map item aktif
- runeMapTarget = 0,     -- target map rune (tidak dipakai ASC, kompatibilitas)
+ runeEnabled   = false, -- rune map item aktif (ASC Tower 1-26)
+ runeMapTarget = 0,     -- target Tower rune (1-26), 0 = nonaktif
  updownEnabled     = false, -- UP/DOWN Rank toggle
  updownDir         = "up",  -- "up" | "down"
  updownTargetGrade = nil,   -- grade target UP/DOWN
@@ -8260,6 +8260,14 @@ function StartAscensionLoop()
       for mn in pairs(ASC.preferMaps) do table.insert(_ms, "Tower "..mn) end
       table.sort(_ms)
       AscStatusUpdate("Waiting Map: "..table.concat(_ms,", ").."...", Color3.fromRGB(100,200,100))
+     elseif ASC.runeEnabled and ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 and next(ASC.runeGrades or {}) ~= nil then
+      AscStatusUpdate("Waiting grade cocok -> override Tower "..ASC.runeMapTarget.."...", Color3.fromRGB(200,140,255))
+     elseif ASC.runeEnabled and ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 then
+      AscStatusUpdate("Waiting Ascension apapun -> override Tower "..ASC.runeMapTarget.."...", Color3.fromRGB(147,197,253))
+     elseif next(ASC.runeGrades or {}) ~= nil then
+      local _gr2 = {}
+      for _, g in ipairs(GRADE_LIST) do if ASC.runeGrades[g] then table.insert(_gr2, g) end end
+      AscStatusUpdate("Waiting grade ["..table.concat(_gr2,"] [").."] [".._pm.."]...", Color3.fromRGB(200,255,150))
      else
       AscStatusUpdate("Waiting Ascension Tower [".._pm.."]...", Color3.fromRGB(255,200,60))
      end
@@ -8327,51 +8335,179 @@ function StartAscensionLoop()
     -- [v52 FIX] Setelah inMap=true di-set, lock tidak diperlukan lagi (IsAnyMapActive sudah cover)
     ReleaseMapLock("asc")
 
-    -- Entry ASC = identik RAID normal, beda hanya mapId:
-    -- RAID: StartChallengeRaidMap({mapId = raidEntry.mapId + 100}) → 50001+100 = 50101-50120
+    -- Entry ASC = identik RAID normal, beda hanya mapId dan RUNE_IDS:
+    -- RAID: StartChallengeRaidMap({mapId = raidEntry.mapId + 100}) → 50101-50120
     -- ASC : StartChallengeRaidMap({mapId = 50300+mn})              → Tower X = 50301-50326
-    -- Pakai ResolveAscTargetMapId(mn) agar selalu 50300+mn - tidak bergantung mapId dari server
+    -- Pakai ResolveAscTargetMapId(mn) agar selalu 50300+mn
+
     local targetMapId = ResolveAscTargetMapId(mn)  -- 50300+mn, confirmed formula
     local mn_label = mn  -- Tower number untuk display
 
     AscStatusUpdate("[~] Enter Tower "..mn_label.."...", Color3.fromRGB(100,200,255))
 
-    -- Sama persis RAID: CreateRaidTeam(raidId)
-    if RE.CreateRaidTeam then
-     pcall(function() RE.CreateRaidTeam:InvokeServer(raidEntry.id) end)
+    -- [v64] ASC RUNE IDS (Preferred Rune / Item) - 26 Tower Ascension
+    local ASC_RUNE_IDS = {
+     [1]=10265,  -- Baran
+     [2]=10266,  -- Baran+1
+     [3]=10267,  -- Grendal
+     [4]=10268,  -- Grendal+1
+     [5]=10269,  -- Plague
+     [6]=10270,  -- Plague+1
+     [7]=10271,  -- Frostborne
+     [8]=10272,  -- Frostborne+1
+     [9]=10273,  -- Legia
+     [10]=10274, -- Legia+1
+     [11]=10275, -- Silas
+     [12]=10276, -- Silas+1
+     [13]=10277, -- Yogumunt
+     [14]=10278, -- Yogumunt+1
+     [15]=10279, -- Antares
+     [16]=10280, -- Antares+1
+     [17]=10281, -- Ashborn
+     [18]=10282, -- Ashborn+1
+     [19]=10283, -- Dominion
+     [20]=10284, -- Dominion+1
+     [21]=10285, -- Absolute
+     [22]=10286, -- Absolute+1
+     [23]=10287, -- Broly
+     [24]=10288, -- Broly+1
+     [25]=10289, -- Goku Super 4
+     [26]=10290, -- Goku Super 4+1
+    }
+
+    -- [v64] FUNGSI UP/DOWN RANK (identik RAID)
+    local function DoAscUpDownOverride()
+     if not ASC.updownEnabled or not RE.UseRaidItem then return end
+     local dir = ASC.updownDir or "up"
+     local udId = (dir == "up") and 10270 or 10271
+     AscStatusUpdate("[~] Override: "..dir:upper(), Color3.fromRGB(200,140,255))
+     pcall(function() RE.UseRaidItem:FireServer(udId) end)
+     task.wait(0.3)
     end
-    task.wait(0.2)
-    if not ASC.running then ASC.inMap = false; break end
 
-    -- Sama persis RAID: StartChallengeRaidMap({mapId=targetMapId})
-    local _cfail = false
-    local _cfConn
-    local _cfRe = Remotes:FindFirstChild("ChallengeRaidsFail")
-    if _cfRe then _cfConn = _cfRe.OnClientEvent:Connect(function() _cfail = true end) end
+    -- [v64] LOGIKA KEPUTUSAN 4 HUKUM (identik RAID, disesuaikan untuk Tower 1-26)
+    local _ascPm = ASC.pickMode or "easy"
+    local useRune  = false
+    local useUpDown = false
 
-    if RE.StartChallengeRaidMap then
-     pcall(function() RE.StartChallengeRaidMap:FireServer({mapId = targetMapId}) end)
+    if _ascPm == "manual" then
+     if ASC.manualMatchMode == "primary" then
+      -- TAHAP 1: MATCH PREFERRED RANK -> HANYA RUNE YANG BOLEH JALAN!
+      if ASC.runeEnabled and ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 then
+       -- ANTI-MUBAZIR: Tower sudah sama, simpan item-nya!
+       if mn == ASC.runeMapTarget then
+        useRune = false
+       else
+        useRune = true
+       end
+      else
+       useRune = false
+      end
+      useUpDown = false -- MUTLAK MATI di TAHAP 1
+
+     elseif ASC.manualMatchMode == "updown" then
+      -- TAHAP 2: MATCH UP/DOWN TARGET -> Rune Mati, UpDown Jalan!
+      useRune   = false
+      useUpDown = true
+
+     elseif ASC.manualMatchMode == "fallback" then
+      -- TAHAP 3: JANGAN MAKSA! Keduanya mati.
+      useRune   = false
+      useUpDown = false
+     end
+    else
+     -- Mode selain Manual (easy, hard, byrank, bymap, default)
+     if ASC.runeEnabled and ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 then
+      if mn == ASC.runeMapTarget then
+       useRune = false -- Tower sudah sama, tidak perlu item
+      else
+       useRune = true
+      end
+     end
+     if ASC.updownEnabled then useUpDown = true end
     end
 
-    -- [v64 FIX] Tunggu ASC.serverMapId (bukan RAID.serverMapId!) max 5s
-    -- Bug lama: ASC.running pakai RAID.serverMapId -> kalau RAID aktif bersamaan,
-    -- serverMapId tidak pernah nil, ASC timeout dan gagal masuk Tower.
-    ASC.serverMapId = nil
-    local _w2 = 0
-    while ASC.serverMapId == nil and _w2 < 5 and ASC.running and not _cfail do
-     task.wait(0.05); _w2 = _w2 + 0.05
-    end
-    if _cfConn then pcall(function() _cfConn:Disconnect() end) end
+    -- [v64] EKSEKUSI (identik RAID - hanya RUNE_IDS dan mapId berbeda)
+    if useRune then
+     -- >>> MODE RUNE TOWER OVERRIDE <<<
+     local targetTower = ASC.runeMapTarget
+     AscStatusUpdate("Create Team...", C.ACC2)
+     if RE.CreateRaidTeam then pcall(function() RE.CreateRaidTeam:InvokeServer(raidEntry.id) end) end
+     task.wait(0.2)
 
-    if _cfail then
-     RAID_LIVE[raidEntry.rawId] = nil
-     if raidEntry.rawId ~= raidEntry.id then RAID_LIVE[raidEntry.id] = nil end
-     if RebuildRaidList then pcall(RebuildRaidList) end
-     ASC.inMap = false; ReleaseMapLock("asc")
-     -- [v64 FIX] Jangan biarkan _ascBusy=true saat gagal masuk -> RAID/MA akan stuck pause
-     _ascBusy = false
-     AscStatusUpdate("[!] Server reject (ChallengeRaidsFail) - retry...", Color3.fromRGB(255,80,80))
-     task.wait(1); break
+     -- Prioritas: Rune dulu, lalu UpDown
+     if useUpDown then DoAscUpDownOverride() end
+
+     AscStatusUpdate("Use Item (Tower "..targetTower..")...", Color3.fromRGB(255,200,60))
+     local itemId = ASC_RUNE_IDS[targetTower]
+     if itemId and RE.UseRaidItem then
+      pcall(function() RE.UseRaidItem:FireServer(itemId) end)
+     end
+     task.wait(0.3)
+
+     local _runeTargetMapId = 50300 + targetTower
+     if RE.StartChallengeRaidMap then
+      pcall(function() RE.StartChallengeRaidMap:FireServer({mapId = _runeTargetMapId}) end)
+     end
+
+     ASC.serverMapId = nil
+     local _wR = 0
+     while ASC.serverMapId == nil and _wR < 10 and ASC.running do
+      task.wait(0.1); _wR = _wR + 0.1
+     end
+
+     -- Fallback jika item habis di inventory
+     if ASC.serverMapId == nil and ASC.running then
+      AscStatusUpdate("[!] Item Kosong - Fallback ke Tower "..mn.."...", Color3.fromRGB(255,140,0))
+      if RE.CreateRaidTeam then pcall(function() RE.CreateRaidTeam:InvokeServer(raidEntry.id) end) end
+      task.wait(0.2)
+      if RE.StartChallengeRaidMap then pcall(function() RE.StartChallengeRaidMap:FireServer({mapId = targetMapId}) end) end
+      local _wFb = 0
+      while ASC.serverMapId == nil and _wFb < 5 and ASC.running do
+       task.wait(0.05); _wFb = _wFb + 0.05
+      end
+     end
+
+    else
+     -- >>> MODE NORMAL / FALLBACK <<<
+     AscStatusUpdate("[~] Enter Tower "..mn_label.."...", Color3.fromRGB(100,200,255))
+     -- Sama persis RAID: CreateRaidTeam(raidId)
+     if RE.CreateRaidTeam then
+      pcall(function() RE.CreateRaidTeam:InvokeServer(raidEntry.id) end)
+     end
+     task.wait(0.2)
+     if not ASC.running then ASC.inMap = false; break end
+
+     if useUpDown then DoAscUpDownOverride() end
+
+     -- Sama persis RAID: StartChallengeRaidMap({mapId=targetMapId})
+     local _cfail = false
+     local _cfConn
+     local _cfRe = Remotes:FindFirstChild("ChallengeRaidsFail")
+     if _cfRe then _cfConn = _cfRe.OnClientEvent:Connect(function() _cfail = true end) end
+
+     if RE.StartChallengeRaidMap then
+      pcall(function() RE.StartChallengeRaidMap:FireServer({mapId = targetMapId}) end)
+     end
+
+     -- [v64 FIX] Tunggu ASC.serverMapId (bukan RAID.serverMapId!) max 5s
+     ASC.serverMapId = nil
+     local _w2 = 0
+     while ASC.serverMapId == nil and _w2 < 5 and ASC.running and not _cfail do
+      task.wait(0.05); _w2 = _w2 + 0.05
+     end
+     if _cfConn then pcall(function() _cfConn:Disconnect() end) end
+
+     if _cfail then
+      RAID_LIVE[raidEntry.rawId] = nil
+      if raidEntry.rawId ~= raidEntry.id then RAID_LIVE[raidEntry.id] = nil end
+      if RebuildRaidList then pcall(RebuildRaidList) end
+      ASC.inMap = false; ReleaseMapLock("asc")
+      -- [v64 FIX] Jangan biarkan _ascBusy=true saat gagal masuk -> RAID/MA akan stuck pause
+      _ascBusy = false
+      AscStatusUpdate("[!] Server reject (ChallengeRaidsFail) - retry...", Color3.fromRGB(255,80,80))
+      task.wait(1); break
+     end
     end
 
     -- Tunggu masuk Tower (max 10s) - sama persis RAID tapi cek range 50301-50326
@@ -11724,8 +11860,27 @@ do
   else ASC.runeEnabled=false end
  end
  AscSyncRuneState()
+
+ -- [v64] Nama boss per Tower (sesuai ASC_RUNE_IDS data)
+ local ASC_TOWER_NAMES = {
+  [1]="Baran",       [2]="Baran+1",
+  [3]="Grendal",     [4]="Grendal+1",
+  [5]="Plague",      [6]="Plague+1",
+  [7]="Frostborne",  [8]="Frostborne+1",
+  [9]="Legia",       [10]="Legia+1",
+  [11]="Silas",      [12]="Silas+1",
+  [13]="Yogumunt",   [14]="Yogumunt+1",
+  [15]="Antares",    [16]="Antares+1",
+  [17]="Ashborn",    [18]="Ashborn+1",
+  [19]="Dominion",   [20]="Dominion+1",
+  [21]="Absolute",   [22]="Absolute+1",
+  [23]="Broly",      [24]="Broly+1",
+  [25]="Goku Super 4", [26]="Goku Super 4+1",
+ }
+
  if ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 then
-  ascRuneDDVal.Text=" Tower "..ASC.runeMapTarget
+  local _tn = ASC_TOWER_NAMES[ASC.runeMapTarget] or ("Tower "..ASC.runeMapTarget)
+  ascRuneDDVal.Text=" Tower "..ASC.runeMapTarget.." - ".._tn
   ascRuneDDVal.TextColor3=C.ACC2
  end
 
@@ -11746,6 +11901,7 @@ do
   sf.ZIndex=9999; sf.CanvasSize=UDim2.new(0,0,0,27*(IH+2)+8)
   local sfl=Instance.new("UIListLayout",sf); sfl.Padding=UDim.new(0,2); sfl.SortOrder=Enum.SortOrder.LayoutOrder
   Instance.new("UIPadding",sf).PaddingTop=UDim.new(0,4)
+  -- Item: NOT SELECTED
   local i0=Instance.new("TextButton",sf); i0.Size=UDim2.new(1,-8,0,IH); i0.LayoutOrder=0
   local s0=(ASC.runeMapTarget==0)
   i0.BackgroundColor3=s0 and C.SURFACE or C.DD_BG; i0.BackgroundTransparency=s0 and 0.18 or 0.42
@@ -11758,20 +11914,22 @@ do
    CloseActiveDD(); ASC.runeMapTarget=0; AscSyncRuneState()
    ascRuneDDVal.Text=" -- NOT SELECTED --"; ascRuneDDVal.TextColor3=C.TXT3
   end)
-  -- [v55] Tower 1-26 (mapId 50301-50326)
+  -- Items: Tower 1-26 dengan nama boss
   for mn=1,26 do
-   local ml=mn
+   local ml=mn; local bossName=ASC_TOWER_NAMES[mn] or ("Tower "..mn)
    local it=Instance.new("TextButton",sf); it.Size=UDim2.new(1,-8,0,IH); it.LayoutOrder=mn
    local iS=(ASC.runeMapTarget==mn)
    it.BackgroundColor3=iS and C.SURFACE or C.DD_BG; it.BackgroundTransparency=iS and 0.18 or 0.42
    it.BorderSizePixel=0; it.Text=""; it.AutoButtonColor=false; it.ZIndex=9999
    Instance.new("UICorner",it).CornerRadius=UDim.new(0,6)
    local il=Instance.new("TextLabel",it); il.Size=UDim2.new(1,-8,1,0); il.Position=UDim2.new(0,8,0,0)
-   il.BackgroundTransparency=1; il.Text="Tower "..mn.." (MapId: "..(50300+mn)..")"; il.TextSize=10; il.Font=Enum.Font.GothamBold
+   il.BackgroundTransparency=1
+   il.Text="Tower "..mn.." - "..bossName; il.TextSize=10; il.Font=Enum.Font.GothamBold
    il.TextColor3=iS and C.ACC2 or C.TXT; il.TextXAlignment=Enum.TextXAlignment.Left; il.ZIndex=9999; il.TextTruncate=Enum.TextTruncate.AtEnd
    it.MouseButton1Click:Connect(function()
     CloseActiveDD(); ASC.runeMapTarget=ml; AscSyncRuneState()
-    ascRuneDDVal.Text=" Tower "..ml; ascRuneDDVal.TextColor3=C.ACC2
+    local _bn2=ASC_TOWER_NAMES[ml] or ("Tower "..ml)
+    ascRuneDDVal.Text=" Tower "..ml.." - ".._bn2; ascRuneDDVal.TextColor3=C.ACC2
    end)
   end
   DDLayer.Visible=true
