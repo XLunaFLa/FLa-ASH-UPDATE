@@ -2323,8 +2323,13 @@ function WaitRaidDone()
         end
 
         -- [BUG FIX v49] 4. Auto Ascension Tower - pause MA saat sedang di dalam Tower
+        -- [v64 FIX] Tambahkan cek _ascBusy: MA juga pause saat ASC cooldown dgn Tower tersedia
+        -- Tanpa ini: race condition MA TP vs ASC TP -> player double-TP -> ASC stuck "Dalam Tower"
         if ASC and ASC.inMap then
             return true, "Auto Ascension"
+        end
+        if ASC and ASC.running and _ascBusy then
+            return true, "Auto Ascension (cooldown)"
         end
 
         return false, nil
@@ -7842,7 +7847,10 @@ ConnectRaidListeners = function()
  -- Event dari map 50101-50120 HANYA boleh masuk ke RAID jika ASC.inMap == false
  -- Ini mencegah serverMapId RAID tercemar oleh event Ascension Tower dan sebaliknya
  if evMapId >= 50300 then
-  -- Ini adalah event Ascension Tower / JTP / ST2 - jangan tulis ke RAID state
+  -- [v64 FIX] Event Ascension Tower: tulis ke ASC.serverMapId (bukan RAID state)
+  if evMapId >= 50301 and evMapId <= 50326 and ASC and (ASC.running or ASC.inMap) then
+   ASC.serverMapId = evMapId
+  end
   return
  end
  -- Dari sini: event adalah RAID normal (mapId 50101-50120 atau 0)
@@ -8345,9 +8353,12 @@ function StartAscensionLoop()
      pcall(function() RE.StartChallengeRaidMap:FireServer({mapId = targetMapId}) end)
     end
 
-    -- Tunggu serverMapId (max 5s) - sama persis RAID
+    -- [v64 FIX] Tunggu ASC.serverMapId (bukan RAID.serverMapId!) max 5s
+    -- Bug lama: ASC.running pakai RAID.serverMapId -> kalau RAID aktif bersamaan,
+    -- serverMapId tidak pernah nil, ASC timeout dan gagal masuk Tower.
+    ASC.serverMapId = nil
     local _w2 = 0
-    while RAID.serverMapId == nil and _w2 < 5 and ASC.running and not _cfail do
+    while ASC.serverMapId == nil and _w2 < 5 and ASC.running and not _cfail do
      task.wait(0.05); _w2 = _w2 + 0.05
     end
     if _cfConn then pcall(function() _cfConn:Disconnect() end) end
@@ -8357,6 +8368,8 @@ function StartAscensionLoop()
      if raidEntry.rawId ~= raidEntry.id then RAID_LIVE[raidEntry.id] = nil end
      if RebuildRaidList then pcall(RebuildRaidList) end
      ASC.inMap = false; ReleaseMapLock("asc")
+     -- [v64 FIX] Jangan biarkan _ascBusy=true saat gagal masuk -> RAID/MA akan stuck pause
+     _ascBusy = false
      AscStatusUpdate("[!] Server reject (ChallengeRaidsFail) - retry...", Color3.fromRGB(255,80,80))
      task.wait(1); break
     end
@@ -8381,6 +8394,8 @@ function StartAscensionLoop()
      if raidEntry.rawId ~= raidEntry.id then RAID_LIVE[raidEntry.id] = nil end
      if RebuildRaidList then pcall(RebuildRaidList) end
      ASC.inMap = false; ReleaseMapLock("asc")
+     -- [v64 FIX] Reset _ascBusy agar RAID/MA tidak stuck pause selamanya saat gagal TP
+     _ascBusy = false
      AscStatusUpdate("[!] Gagal masuk Tower - retry...", Color3.fromRGB(255,80,80))
      task.wait(1); break
     end
@@ -8417,8 +8432,36 @@ function StartAscensionLoop()
 
     AscStatusUpdate("[~] Dalam Tower "..mn.." - loading...", Color3.fromRGB(100,200,255))
 
-    -- [v52 FIX] _ascDone, _ascSuccess, connAS, connAF sudah dideklarasikan di atas (sebelum enemy wait loop)
-    -- Tidak perlu deklarasi ulang di sini
+    -- [v64 FIX] Watchdog: reset ASC.inMap + _ascBusy jika player terdeteksi keluar Tower
+    -- Ini handle kasus race condition: MA/RAID TP player keluar saat ASC masih "inMap=true"
+    -- Tanpa ini: ASC stuck "Dalam Tower... Loading" selamanya karena state tidak pernah direset
+    local _watchdogTh = task.spawn(function()
+     while ASC.inMap and ASC.running do
+      task.wait(1)
+      local ok, wm = pcall(function()
+       return workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or 0
+      end)
+      if ok and type(wm) == "number" then
+       -- Jika player tidak di Ascension Tower range, berarti sudah keluar secara paksa
+       if wm > 0 and (wm < 50301 or wm > 50326) then
+        -- Jangan langsung reset jika masih di fase loading awal (beri waktu 3s)
+        task.wait(3)
+        local ok2, wm2 = pcall(function()
+         return workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or 0
+        end)
+        if ok2 and type(wm2) == "number" and (wm2 < 50301 or wm2 > 50326) and wm2 > 0 then
+         AscStatusUpdate("[!] Watchdog: Player keluar Tower paksa - reset state", Color3.fromRGB(255,80,80))
+         ASC.inMap = false
+         _ascBusy = false
+         ReleaseMapLock("asc")
+         break
+        end
+       end
+      end
+     end
+    end)
+
+
 
     -- [v48] AUTO BOSS KILL - sama persis dengan AUTO RAID
     if ASC.autoKillBoss then
@@ -8746,14 +8789,26 @@ function StartAscensionLoop()
      local _wt = 0
      while ASC.running and not _ascDone and _wt < 300 do
       task.wait(1); _wt = _wt + 1
-      -- Guard keluar Tower
-      local wm = workspace:GetAttribute("MapId") or 0
-      if wm == 0 or (wm >= 50001 and wm <= 50028) then break end
+      -- [v64 FIX] Guard keluar Tower: cek lebih komprehensif
+      -- Jika player sudah tidak di Ascension Tower (50301-50326), berarti sudah keluar
+      -- (bisa karena MA/RAID TP player keluar, atau server kick, atau kolisi event)
+      local wm = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or 0
+      if wm == 0 or (wm >= 50001 and wm <= 50028) then
+       AscStatusUpdate("[!] Player keluar Tower (ext) - abort wait", Color3.fromRGB(255,140,0))
+       break
+      end
+      -- Jika player tiba-tiba di map RAID normal atau Siege, juga keluar
+      if (wm >= 50101 and wm <= 50120) or (wm >= 50201 and wm <= 50204) then
+       AscStatusUpdate("[!] Player di map lain - abort wait", Color3.fromRGB(255,140,0))
+       break
+      end
      end
     end
 
     if connAS then pcall(function() connAS:Disconnect() end) end
     if connAF then pcall(function() connAF:Disconnect() end) end
+    -- [v64 FIX] Cancel watchdog setelah keluar Tower normal
+    if _watchdogTh then pcall(function() task.cancel(_watchdogTh) end) end
 
     if _ascSuccess then
      ASC.sukses = ASC.sukses + 1
@@ -8803,6 +8858,7 @@ function StartAscensionLoop()
     end
 
     ASC.inMap = false
+    ASC.serverMapId = nil -- [v64 FIX] Reset agar run berikutnya tidak pakai data stale
     ReleaseMapLock("asc") -- [v52 FIX] Pastikan lock selalu dilepas saat keluar map
     -- [v62 FIX] Reset status agar tidak nyantol di "Dalam Tower x" saat sudah di Lobby
     AscStatusUpdate("[>>] Keluar Tower - cooldown...", Color3.fromRGB(160,148,135))
