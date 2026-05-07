@@ -6836,10 +6836,13 @@ ASC_BOSS_NAME_MAP = {
  [20] = "goku[super4]",
 }
 
+end -- chat listener + grade cache
+
 -- [v73] FindBossByExactName: Cari boss di Workspace.Enemys dengan exact match nama
 -- exactName = string nama boss (case-insensitive exact), bukan substring
 -- Return: {guid, hrp, model} atau nil
-local function FindBossByExactName(exactName)
+-- GLOBAL (bukan local) agar bisa diakses dari RAID STEP4 dan ASC STEP4
+function FindBossByExactName(exactName)
  if not exactName then return nil end
  local lowerTarget = exactName:lower()
  local eFolder = workspace:FindFirstChild("Enemys")
@@ -6856,8 +6859,6 @@ local function FindBossByExactName(exactName)
  end
  return nil
 end
-
-end -- chat listener + grade cache
 
 -- ============================================================
 -- GRADE CACHE & PARSER
