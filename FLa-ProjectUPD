@@ -8647,27 +8647,21 @@ function StartAscensionLoop()
       _ascTargetBossName = raidEntry.bossName
      end
 
-     -- [GODMODE v2] Helper: scan HANYA Workspace.Enemys, partial match
+     -- [GODMODE v2] Helper: FindFirstChild EKSAK di Workspace.Enemys
      local function ScanAscEnemysFolder(targetName)
       local ef2 = workspace:FindFirstChild("Enemys")
       if not ef2 or not targetName then return nil end
-      local tLow = targetName:lower()
-      for _, obj in ipairs(ef2:GetChildren()) do
-       if obj:IsA("Model") then
-        local nameLow = obj.Name:lower()
-        if nameLow:find(tLow, 1, true) or tLow:find(nameLow, 1, true) then
-         local g   = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid")
-                   or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
-         local hrp = obj:FindFirstChild("HumanoidRootPart")
-                  or obj.PrimaryPart
-                  or obj:FindFirstChild("Torso")
-                  or obj:FindFirstChild("UpperTorso")
-                  or obj:FindFirstChildWhichIsA("BasePart")
-         local hum = obj:FindFirstChildOfClass("Humanoid")
-         if g and hrp and hum and hum.Health > 0 then
-          return {guid=g, hrp=hrp, model=obj}
-         end
-        end
+      local obj = ef2:FindFirstChild(targetName) -- nama EKSAK, case-sensitive
+      if obj and obj:IsA("Model") then
+       local g   = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid")
+                 or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
+       local hrp = obj:FindFirstChild("HumanoidRootPart")
+                or obj.PrimaryPart
+                or obj:FindFirstChild("Torso")
+                or obj:FindFirstChildWhichIsA("BasePart")
+       local hum = obj:FindFirstChildOfClass("Humanoid")
+       if g and hrp and hum and hum.Health > 0 then
+        return {guid=g, hrp=hrp, model=obj}
        end
       end
       return nil
@@ -8675,9 +8669,7 @@ function StartAscensionLoop()
 
      local function IsBossAscWithHint(name)
       if not _ascTargetBossName then return false end
-      local n = name:lower()
-      local t = _ascTargetBossName:lower()
-      return n:find(t, 1, true) or t:find(n, 1, true)
+      return name == _ascTargetBossName
      end
 
      -- [GODMODE v2] Early boss detection ASC - scan HANYA Workspace.Enemys
@@ -8825,60 +8817,41 @@ function StartAscensionLoop()
         end
        end)
 
-       -- 3) Fire hero remotes
-       pcall(function()
-        local safePos3 = GetSafeAscBossPos()
-        if safePos3 then FireHeroRemotes(bossGuid, safePos3) end
-       end)
-       if RE.HeroStand and #HERO_GUIDS > 0 then
-        local safePos3b = GetSafeAscBossPos()
-        if safePos3b then
-         for _, hGuid in ipairs(HERO_GUIDS) do
-          pcall(function()
-           RE.HeroStand:FireServer({ heroGuid=hGuid, userId=MY_USER_ID, standPos=safePos3b+Vector3.new(1,0,1) })
-          end)
-         end
-        end
-       end
-
-       -- 4) UnEquip -> EquipBest
+       -- 3) UnEquip -> EquipBest (refresh hero di posisi boss)
        task.wait(0.3)
        if RE.UnEquipHero then pcall(function() RE.UnEquipHero:FireServer() end) end
        task.wait(0.3)
        if RE.EquipBestHero then pcall(function() RE.EquipBestHero:FireServer() end) end
        task.wait(0.3)
 
-       -- 5) TP ulang hero setelah re-equip
+       -- 4) TP ulang semua hero setelah re-equip (CFrame fisik saja)
        pcall(function()
-        local safePos5 = GetSafeAscBossPos()
-        if not safePos5 then return end
+        local safePos4 = GetSafeAscBossPos()
+        if not safePos4 then return end
         local heroFolder = workspace:FindFirstChild("Heros")
         if heroFolder then
          for _, hModel in ipairs(heroFolder:GetChildren()) do
           local hHrp = hModel:FindFirstChild("HumanoidRootPart")
           if hHrp then
-           hHrp.CFrame = CFrame.new(safePos5 + Vector3.new(math.random(-2,2),0,math.random(-2,2)))
+           hHrp.CFrame = CFrame.new(safePos4 + Vector3.new(math.random(-2,2),0,math.random(-2,2)))
           end
          end
         end
        end)
-       pcall(function()
-        local safePos5b = GetSafeAscBossPos()
-        if safePos5b then FireHeroRemotes(bossGuid, safePos5b) end
-       end)
 
-       -- 6) Background thread: TP player+hero terus ke boss tiap 0.5s
+       -- 5) Background thread: TP player+hero CFrame ke boss tiap 0.5s
        local _tpTh = task.spawn(function()
         while ASC.running and not _ascDone do
-         -- [v48] Stop TP jika sudah keluar Ascension Tower
          local _tpMap = GetCurrentMapId()
          if _tpMap and (_tpMap < 50301 or _tpMap > 50326) then break end
          pcall(function()
           local pos = GetSafeAscBossPos()
           if not pos then return end
+          -- TP player
           local char = LP.Character
           local hrp = char and char:FindFirstChild("HumanoidRootPart")
           if hrp then hrp.CFrame = CFrame.new(pos + Vector3.new(3,0,0)) end
+          -- [GODMODE v2] TP Heroes CFrame fisik saja
           local heroFolder = workspace:FindFirstChild("Heros")
           if heroFolder then
            for _, hModel in ipairs(heroFolder:GetChildren()) do
@@ -8888,43 +8861,39 @@ function StartAscensionLoop()
             end
            end
           end
-          FireHeroRemotes(bossGuid, pos)
-          if RE.HeroStand then
-           for _, hGuid in ipairs(HERO_GUIDS) do
-            pcall(function()
-             RE.HeroStand:FireServer({ heroGuid=hGuid, userId=MY_USER_ID, standPos=pos+Vector3.new(1,0,1) })
-            end)
-           end
-          end
          end)
          task.wait(0.5)
         end
        end)
 
-       -- 7) Serang boss (sama dengan RAID: 0.08s per attack)
+       -- 6) Serang boss - ChildRemoved detection dari Workspace.Enemys
+       local _ascBossRemoved = false
+       local _ascBossRemovedConn = nil
+       local _ascEf5 = workspace:FindFirstChild("Enemys")
+       if _ascEf5 then
+        _ascBossRemovedConn = _ascEf5.ChildRemoved:Connect(function(removed)
+         if removed.Name == boss.model.Name then
+          _ascBossRemoved = true
+         end
+        end)
+       end
+
        AscStatusUpdate("[GODMODE] Attack: Enemys."..boss.model.Name, Color3.fromRGB(255,80,80))
        while ASC.running and not _ascDone do
-        -- Validasi: player harus masih di Ascension Tower
         local _curMap = GetCurrentMapId()
         if _curMap and (_curMap < 50301 or _curMap > 50326) then
          AscStatusUpdate("[!] Player keluar Tower - stop attack", Color3.fromRGB(255,140,0))
          break
         end
-        -- [GODMODE v2] Dual death detection:
-        -- 1. Cek model tidak ada lagi di Workspace.Enemys
-        local _ef4 = workspace:FindFirstChild("Enemys")
-        local _bossStillInEnemysAsc = _ef4 and _ef4:FindFirstChild(boss.model.Name)
-        if not _bossStillInEnemysAsc then break end
-        -- 2. Cek Humanoid.Health <= 0
-        if not boss.model or not boss.model.Parent then break end
-        local hum = boss.model:FindFirstChildOfClass("Humanoid")
-        if hum and hum.Health <= 0 then break end
+        -- [GODMODE v2] Deteksi mati: ChildRemoved dari Workspace.Enemys
+        if _ascBossRemoved then break end
         local p = GetSafeAscBossPos()
         if not p then task.wait(0.08); continue end
         task.spawn(function() pcall(function() RaidFireDamage(bossGuid, p) end) end)
         task.wait(0.08)
        end
 
+       if _ascBossRemovedConn then pcall(function() _ascBossRemovedConn:Disconnect() end) end
        pcall(function() task.cancel(_tpTh) end)
        _ascSuccess = true
        _ascDone = true
@@ -10213,45 +10182,30 @@ local function ResolveEntry()
  -- Nama boss target berdasarkan mapId aktual (activeMapId = 50101-50120)
  local _targetBossName = activeMapId and RAID_BOSS_BY_MAP[activeMapId] or nil
 
- -- [GODMODE] Helper: scan Workspace.Enemys dan cari boss sesuai nama target
- -- Partial match (lowercase) agar toleran terhadap variasi huruf kapital game
+ -- [GODMODE v2] Helper: FindFirstChild EKSAK di Workspace.Enemys (nama persis sama)
  local function ScanEnemysFolder(targetName)
-  local result = nil
   local ef = workspace:FindFirstChild("Enemys")
-  if not ef then return nil end
-  local tLow = targetName and targetName:lower() or nil
-  for _, obj in ipairs(ef:GetChildren()) do
-   if obj:IsA("Model") then
-    local nameLow = obj.Name:lower()
-    local matched = false
-    if tLow then
-     matched = nameLow:find(tLow, 1, true) or tLow:find(nameLow, 1, true)
-    end
-    if matched then
-     local g   = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid")
-               or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
-     local hrp = obj:FindFirstChild("HumanoidRootPart")
-              or obj.PrimaryPart
-              or obj:FindFirstChild("Torso")
-              or obj:FindFirstChild("UpperTorso")
-              or obj:FindFirstChildWhichIsA("BasePart")
-     local hum = obj:FindFirstChildOfClass("Humanoid")
-     if g and hrp and hum and hum.Health > 0 then
-      result = {guid=g, hrp=hrp, model=obj}
-      break
-     end
-    end
+  if not ef or not targetName then return nil end
+  local obj = ef:FindFirstChild(targetName) -- nama EKSAK, case-sensitive
+  if obj and obj:IsA("Model") then
+   local g   = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid")
+             or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
+   local hrp = obj:FindFirstChild("HumanoidRootPart")
+            or obj.PrimaryPart
+            or obj:FindFirstChild("Torso")
+            or obj:FindFirstChildWhichIsA("BasePart")
+   local hum = obj:FindFirstChildOfClass("Humanoid")
+   if g and hrp and hum and hum.Health > 0 then
+    return {guid=g, hrp=hrp, model=obj}
    end
   end
-  return result
+  return nil
  end
 
- -- Helper IsBoss: cek apakah nama cocok dengan target boss map ini
+ -- Helper IsBoss: nama EKSAK sama dengan target boss map ini
  local function IsBossWithHint(name)
   if not _targetBossName then return false end
-  local n = name:lower()
-  local t = _targetBossName:lower()
-  return n:find(t, 1, true) or t:find(n, 1, true)
+  return name == _targetBossName
  end
 
  -- [GODMODE] Cari boss dari early detection dulu (sudah di-scan sebelumnya)
@@ -10409,7 +10363,7 @@ local function ResolveEntry()
    if hrp and safePos then hrp.CFrame = CFrame.new(safePos + Vector3.new(3,0,0)) end
   end)
 
-  -- 2) TP SEMUA Heroes (Workspace.Heros) langsung ke posisi boss di Workspace.Enemys
+  -- 2) TP SEMUA Heroes (Workspace.Heros) langsung ke posisi boss - CFrame fisik saja
   pcall(function()
    local safePos2 = GetSafeBossPos()
    if not safePos2 then return end
@@ -10424,50 +10378,26 @@ local function ResolveEntry()
    end
   end)
 
-  -- 3) Fire SEMUA hero remote ke posisi boss
-  pcall(function()
-   local safePos3 = GetSafeBossPos()
-   if safePos3 then FireHeroRemotes(bossGuid, safePos3) end
-  end)
-  if RE.HeroStand and #HERO_GUIDS > 0 then
-   local safePos3b = GetSafeBossPos()
-   if safePos3b then
-    for _, hGuid in ipairs(HERO_GUIDS) do
-     pcall(function()
-      RE.HeroStand:FireServer({
-       heroGuid = hGuid,
-       userId = MY_USER_ID,
-       standPos = safePos3b + Vector3.new(1, 0, 1),
-      })
-     end)
-    end
-   end
-  end
-
-  -- 4) UnEquip -> EquipBest (refresh hero di posisi boss)
+  -- 3) UnEquip -> EquipBest (refresh hero di posisi boss)
   task.wait(0.3)
   if RE.UnEquipHero then pcall(function() RE.UnEquipHero:FireServer() end) end
   task.wait(0.3)
   if RE.EquipBestHero then pcall(function() RE.EquipBestHero:FireServer() end) end
   task.wait(0.3)
 
-  -- 5) TP ulang semua hero setelah re-equip
+  -- 4) TP ulang semua hero setelah re-equip (CFrame fisik saja)
   pcall(function()
-   local safePos5 = GetSafeBossPos()
-   if not safePos5 then return end
+   local safePos4 = GetSafeBossPos()
+   if not safePos4 then return end
    local heroFolder = workspace:FindFirstChild("Heros")
    if heroFolder then
     for _, hModel in ipairs(heroFolder:GetChildren()) do
      local hHrp = hModel:FindFirstChild("HumanoidRootPart")
      if hHrp then
-      hHrp.CFrame = CFrame.new(safePos5 + Vector3.new(math.random(-2,2), 0, math.random(-2,2)))
+      hHrp.CFrame = CFrame.new(safePos4 + Vector3.new(math.random(-2,2), 0, math.random(-2,2)))
      end
     end
    end
-  end)
-  pcall(function()
-   local safePos5b = GetSafeBossPos()
-   if safePos5b then FireHeroRemotes(bossGuid, safePos5b) end
   end)
 
   -- 6) Background thread: TP player+hero terus ke Enemys.BossName tiap 0.5s
@@ -10478,11 +10408,11 @@ local function ResolveEntry()
    pcall(function()
     local pos = GetSafeBossPos() -- selalu fresh dari Workspace.Enemys
     if not pos then return end
-    -- TP player
+    -- TP player ke posisi boss
     local char = LP.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if hrp then hrp.CFrame = CFrame.new(pos + Vector3.new(3,0,0)) end
-    -- TP semua hero ke posisi boss
+    -- [GODMODE v2] TP semua Heroes (Workspace.Heros) ke posisi boss - CFrame fisik saja
     local heroFolder = workspace:FindFirstChild("Heros")
     if heroFolder then
      for _, hModel in ipairs(heroFolder:GetChildren()) do
@@ -10492,25 +10422,24 @@ local function ResolveEntry()
       end
      end
     end
-    -- Fire hero remotes
-    FireHeroRemotes(bossGuid, pos)
-    if RE.HeroStand then
-     for _, hGuid in ipairs(HERO_GUIDS) do
-      pcall(function()
-       RE.HeroStand:FireServer({
-        heroGuid = hGuid,
-        userId = MY_USER_ID,
-        standPos = pos + Vector3.new(1, 0, 1),
-       })
- end)
- end
- end
- end)
- task.wait(0.5)
- end
+   end)
+   task.wait(0.5)
+  end
  end)
 
  -- 7) SERANG BOSS - langsung tanpa jeda
+ -- [GODMODE v2] Deteksi mati via ChildRemoved dari Workspace.Enemys
+ local _bossRemovedFromEnemys = false
+ local _bossRemovedConn = nil
+ local _ef2 = workspace:FindFirstChild("Enemys")
+ if _ef2 then
+  _bossRemovedConn = _ef2.ChildRemoved:Connect(function(removed)
+   if removed.Name == boss.model.Name then
+    _bossRemovedFromEnemys = true
+   end
+  end)
+ end
+
  RaidStatusUpdate("[GODMODE] Attack: Enemys."..boss.model.Name, Color3.fromRGB(255,80,80))
  local _outOfMapCount = 0
  while RAID.running and not RAID._raidDone do
@@ -10525,21 +10454,15 @@ local function ResolveEntry()
   else
    _outOfMapCount = 0
   end
-  -- [GODMODE v2] Dual death detection:
-  -- 1. Cek model sudah tidak ada di Workspace.Enemys (instance removed)
-  local _ef2 = workspace:FindFirstChild("Enemys")
-  local _bossStillInEnemys = _ef2 and _ef2:FindFirstChild(boss.model.Name)
-  if not _bossStillInEnemys then break end -- model sudah hilang dari Enemys -> mati
-  -- 2. Cek Humanoid.Health <= 0
-  if not boss.model or not boss.model.Parent then break end
-  local hum = boss.model:FindFirstChildOfClass("Humanoid")
-  if hum and hum.Health <= 0 then break end
+  -- [GODMODE v2] Deteksi mati: ChildRemoved event terpicu
+  if _bossRemovedFromEnemys then break end
   local p = GetSafeBossPos()
   if not p then task.wait(0.08); continue end
   task.spawn(function() pcall(function() RaidFireDamage(bossGuid, p) end) end)
   task.wait(0.08)
  end
 
+ if _bossRemovedConn then pcall(function() _bossRemovedConn:Disconnect() end) end
  pcall(function() task.cancel(_tpTh) end)
  _raidSuccess = true
  RAID._raidDone = true
