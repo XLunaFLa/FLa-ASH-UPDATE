@@ -9054,69 +9054,21 @@ end
 -- Scan enemy/boss di workspace
 -- [GODMODE FIX] Relax filter jarak, tambah fallback scan seluruh workspace
 -- [GODMODE FIX 2] Validasi mapId realtime - pastikan player di dalam raid map
+-- [FIX v69c] GetRaidEnemies: hanya workspace.Enemys, tanpa GUID/Health check
+-- Cukup Model + HumanoidRootPart -> masuk list. Ini yang dipakai _mapHasEnemies check.
 function GetRaidEnemies()
  local list = {}
- local seen = {}
-
- -- [v51-FIX] Hapus hard early-return berdasarkan MapId — terlalu agresif.
- -- Guard lama menyebabkan scan gagal saat MapId belum update (race condition Delta Android)
- -- atau saat workspace.MapId pakai attribute name berbeda dari yang di-read.
- -- Sekarang: tetap scan workspace, hanya matikan distFilter jika mapId tidak dikenali.
- local currentMapId = GetCurrentMapId()
- local _inNormalRaid = currentMapId and (currentMapId >= 50101 and currentMapId <= 50120)
- local _inAscTower  = currentMapId and (currentMapId >= 50301 and currentMapId <= 50326)
- -- (tidak ada early return di sini — biarkan scan tetap berjalan)
-
- -- spawnPos hanya relevan untuk Normal Raid (Ascension Tower tidak pakai RAID_SPAWN_POS)
- local activeMapId = (_inNormalRaid and RAID and RAID.serverMapId) or nil
- local spawnPos = activeMapId and RAID_SPAWN_POS and RAID_SPAWN_POS[activeMapId]
- -- [FIX] Perbesar radius 2000->8000 agar boss yang spawn jauh tetap terdeteksi
- -- Map 19/20 punya spawnPos 0,0,0 - jika spawnPos tidak valid (magnitude<1), nonaktifkan filter
- local MAX_DIST = 8000
- local useDistFilter = spawnPos and spawnPos.Magnitude > 1
-
- local function addEnemy(e)
- if not e:IsA("Model") then return end
- local g = e:GetAttribute("EnemyGuid") or e:GetAttribute("BossGuid") or e:GetAttribute("Guid") or e:GetAttribute("GUID")
- if not g or seen[g] then return end
- -- Fallback: beberapa boss (Giant Arachnid, dll) tidak punya HumanoidRootPart
- -- Coba HumanoidRootPart -> PrimaryPart -> Torso -> UpperTorso -> bagian apapun
- local hrp = e:FindFirstChild("HumanoidRootPart")
-       or e.PrimaryPart
-       or e:FindFirstChild("Torso")
-       or e:FindFirstChild("UpperTorso")
-       or e:FindFirstChildWhichIsA("BasePart")
- local hum = e:FindFirstChildOfClass("Humanoid")
- if not (hrp and hum and hum.Health > 0) then return end
- if useDistFilter then
- local dist = (hrp.Position - spawnPos).Magnitude
- if dist > MAX_DIST then return end
+ local ef = workspace:FindFirstChild("Enemys")
+ if not ef then return list end
+ for _, e in ipairs(ef:GetChildren()) do
+  if e:IsA("Model") then
+   local hrp = e:FindFirstChild("HumanoidRootPart")
+         or e.PrimaryPart
+         or e:FindFirstChild("Torso")
+         or e:FindFirstChildWhichIsA("BasePart")
+   if hrp then table.insert(list, {hrp=hrp, model=e}) end
+  end
  end
- seen[g] = true
- table.insert(list, {guid=g, hrp=hrp, model=e})
- end
-
- -- Scan folder-folder utama
- for _, fname in ipairs({"Bosses","Boss","RaidBoss","Enemys","Enemy","Enemies","RaidEnemys","Monsters","Monster"}) do
- local folder = workspace:FindFirstChild(fname)
- if folder then
- for _, e in ipairs(folder:GetChildren()) do addEnemy(e) end
- end
- end
-
- -- [GODMODE FIX] Fallback: scan langsung children workspace jika folder tidak ketemu / list kosong
- if #list == 0 then
- for _, obj in ipairs(workspace:GetChildren()) do
- if obj:IsA("Model") then
- addEnemy(obj)
- -- Scan nested (beberapa game taruh enemy di sub-model)
- for _, child in ipairs(obj:GetChildren()) do
- addEnemy(child)
- end
- end
- end
- end
-
  return list
 end
 
@@ -9864,19 +9816,31 @@ local function ResolveEntry()
                             pcall(function() RE.StartChallengeRaidMap:FireServer({mapId = _runeMapId}) end)
                         end
                         
+                        -- [FIX v69c] Tunggu masuk map via GetCurrentMapId() - tidak bergantung serverMapId
+                        -- serverMapId sering nil di Delta karena event timing
                         local _wR = 0
-                        while RAID.serverMapId == nil and _wR < 10 and RAID.running do
+                        while _wR < 10 and RAID.running do
                             task.wait(0.1); _wR = _wR + 0.1
+                            local _curMid = GetCurrentMapId()
+                            if _curMid and _curMid >= 50101 and _curMid <= 50120 then
+                                RAID.serverMapId = _curMid; break
+                            end
                         end
-                        
-                        -- Fallback jika tiket Rune Map ternyata habis di inventory
-                        if RAID.serverMapId == nil and RAID.running then
-                            RaidStatusUpdate("[!] Material Kosong - Fallback...", Color3.fromRGB(255,140,0))
+                        -- Fallback jika rune item habis di inventory (mapId tidak berubah setelah 10s)
+                        if not RAID.serverMapId and RAID.running then
+                            RaidStatusUpdate("[!] Material Kosong - Fallback normal...", Color3.fromRGB(255,140,0))
                             local _fbTargetMapId = raidEntry.mapId + 100
                             if RE.CreateRaidTeam then pcall(function() RE.CreateRaidTeam:InvokeServer(RAID.raidId) end) end
                             task.wait(0.2)
                             if RE.StartChallengeRaidMap then pcall(function() RE.StartChallengeRaidMap:FireServer({mapId = _fbTargetMapId}) end) end
-                            local _wFb = 0; while RAID.serverMapId == nil and _wFb < 5 and RAID.running do task.wait(0.05); _wFb = _wFb + 0.05 end
+                            local _wFb = 0
+                            while _wFb < 5 and RAID.running do
+                                task.wait(0.1); _wFb = _wFb + 0.1
+                                local _curMid2 = GetCurrentMapId()
+                                if _curMid2 and _curMid2 >= 50101 and _curMid2 <= 50120 then
+                                    RAID.serverMapId = _curMid2; break
+                                end
+                            end
                         end
                         
                     else
@@ -9900,8 +9864,15 @@ local function ResolveEntry()
                             pcall(function() RE.StartChallengeRaidMap:FireServer({mapId = targetMapId}) end)
                         end
 
+                        -- [FIX v69c] Tunggu masuk map via GetCurrentMapId() bukan serverMapId
                         local _w2 = 0
-                        while RAID.serverMapId == nil and _w2 < 5 and RAID.running and not _cfail do task.wait(0.05); _w2 = _w2 + 0.05 end
+                        while _w2 < 5 and RAID.running and not _cfail do
+                            task.wait(0.1); _w2 = _w2 + 0.1
+                            local _curMid3 = GetCurrentMapId()
+                            if _curMid3 and _curMid3 >= 50101 and _curMid3 <= 50120 then
+                                RAID.serverMapId = _curMid3; break
+                            end
+                        end
 
                         if _cfConn then pcall(function() _cfConn:Disconnect() end) end
                         if _cfail then
@@ -9912,23 +9883,16 @@ local function ResolveEntry()
                     end
  -- STEP 3: Tunggu masuk map (max 10s) - flow sama persis v41
  RaidStatusUpdate("[~] Waiting...", Color3.fromRGB(180,100,255))
+ -- [FIX v69c] _tpOk: cek GetCurrentMapId() langsung - tidak bergantung serverMapId
  local _tpOk = false
  local _tpWait = 0
  while not _tpOk and _tpWait < 10 and RAID.running do
   task.wait(0.3); _tpWait = _tpWait + 0.3
-  pcall(function()
-   local wMapId = workspace:GetAttribute("MapId") or workspace:GetAttribute("mapId") or workspace:GetAttribute("CurrentMapId")
-   if wMapId then
-    if RAID.serverMapId and wMapId == RAID.serverMapId then
-     _tpOk = true
-    elseif RAID.runeEnabled then
-     local ok = (wMapId >= 50101 and wMapId <= 50120)
-     if ok then RAID.serverMapId = wMapId; _tpOk = true end
-    elseif (wMapId >= 50101 and wMapId <= 50120) then
-     _tpOk = true
-    end
-   end
-  end)
+  local wMapId = GetCurrentMapId()
+  if wMapId and wMapId >= 50101 and wMapId <= 50120 then
+   RAID.serverMapId = wMapId -- update serverMapId sekalian
+   _tpOk = true
+  end
   -- Fallback: kalau enemy sudah ada, berarti sudah di dalam map
   if not _tpOk and #GetRaidEnemies() > 0 then _tpOk = true end
  end
