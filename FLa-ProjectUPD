@@ -9959,12 +9959,25 @@ local function ResolveEntry()
                         local _runeMapId = 50100 + targetMap
                         if not RAID.fromMapId then RAID.fromMapId = RAID.raidMapId end
 
-                        -- [v70 FIX] Urutan BENAR: UseRaidItem DULU sebelum CreateRaidTeam
-                        -- Urutan lama: CreateRaidTeam -> UseRaidItem -> StartChallengeRaidMap
-                        --   BUG: CreateRaidTeam langsung commit ke raidEntry.mapId (Map asal),
-                        --        server kirim EnterRaidsUpdateInfo dengan mapId lama sebelum rune aktif.
-                        -- Urutan baru: UseRaidItem -> CreateRaidTeam -> StartChallengeRaidMap
-                        --   FIX: Rune sudah aktif di server saat CreateRaidTeam dipanggil.
+                        -- [v71 FIX] Urutan BENAR:
+                        -- 1. Set serverMapId ke runeMap DULU (cegah event overwrite)
+                        -- 2. CreateRaidTeam(raidId)         -> server buat team slot
+                        -- 3. UseRaidItem(itemId)            -> rune di-apply ke team slot
+                        -- 4. StartChallengeRaidMap(runeMap) -> masuk map hasil rune
+                        --
+                        -- UseRaidItem WAJIB setelah CreateRaidTeam karena server butuh
+                        -- team slot aktif untuk menerima rune. Jika dipanggil sebelumnya,
+                        -- rune dikonsumsi tapi diabaikan -> player masuk map asal.
+
+                        -- [v71] Pre-set serverMapId sebelum event EnterRaidsUpdateInfo bisa overwrite
+                        RAID.serverMapId = _runeMapId
+
+                        RaidStatusUpdate("Create Team (Map "..targetMap..")...", C.ACC2)
+                        if RE.CreateRaidTeam then pcall(function() RE.CreateRaidTeam:InvokeServer(RAID.raidId) end) end
+                        task.wait(0.3)
+
+                        -- UpDown override setelah team terbuat
+                        if useUpDown then DoUpDownOverride() end
 
                         RaidStatusUpdate("Use Item (Map "..targetMap..")...", Color3.fromRGB(255,200,60))
                         local RUNE_IDS = {
@@ -9976,17 +9989,6 @@ local function ResolveEntry()
                             pcall(function() RE.UseRaidItem:FireServer(itemId) end)
                         end
                         task.wait(0.3)
-
-                        -- UpDown override setelah rune aktif, sebelum CreateRaidTeam
-                        if useUpDown then DoUpDownOverride() end
-
-                        -- [v70 FIX] Set RAID.serverMapId ke target map dulu sebelum CreateRaidTeam
-                        -- agar event EnterRaidsUpdateInfo yang datang dengan mapId lama tidak menimpa target kita
-                        RAID.serverMapId = _runeMapId
-
-                        RaidStatusUpdate("Create Team (Map "..targetMap..")...", C.ACC2)
-                        if RE.CreateRaidTeam then pcall(function() RE.CreateRaidTeam:InvokeServer(RAID.raidId) end) end
-                        task.wait(0.2)
 
                         if RE.StartChallengeRaidMap then
                             pcall(function() RE.StartChallengeRaidMap:FireServer({mapId = _runeMapId}) end)
