@@ -7084,14 +7084,32 @@ _WH = {}
 
 -- Helper: dapatkan request function (support semua executor)
 local function _getReqFunc()
- -- [FIX] Tambah executor lain yang umum dipakai
- return request or http_request or httprequest or (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request) or (krnl and krnl.request) or (electron and electron.request) or nil
+ -- Support semua executor: Delta, Fluxus, Xeno, Solara, Synapse, KRNL, dll
+ local _r = request or http_request or httprequest
+  or (syn and syn.request)
+  or (http and http.request)
+  or (fluxus and fluxus.request)
+  or (krnl and krnl.request)
+  or (electron and electron.request)
+  or (Drawing and Drawing.request) -- beberapa build custom
+ -- getgenv fallback: executor expose request di env berbeda
+ if not _r then
+  pcall(function()
+   local _env = getgenv and getgenv() or nil
+   if _env then
+    _r = _env.request or _env.http_request or _env.httprequest
+   end
+  end)
+ end
+ return _r or nil
 end
 
 -- Helper: kirim HTTP POST ke Discord atau Telegram
 local function _doSend(url, text)
  local reqFunc = _getReqFunc()
  if not reqFunc then
+ -- [FIX] Executor tidak support HTTP request - warn ke output
+ pcall(function() warn("[ASH Webhook] ERROR: Tidak ada request function! Executor tidak support HTTP.") end)
  return false
  end
  local HS = game:GetService("HttpService")
@@ -15131,11 +15149,11 @@ do
  if _WH.SendSiege then _WH.SendSiege(url) end; sent = true
  end
  if not sent then
- -- Tidak ada data raid/siege - kirim pesan info
- if _WH.SendCustomMessage then
- _WH.SendCustomMessage(url, "[FLa]",
- nil, nil)
- end
+ -- Tidak ada data raid/siege aktif saat tombol ditekan
+ if _snDone then return end; _snDone = true
+ sendNowLbl.Text="[!] No Raid Data"; sendNowLbl.TextColor3=Color3.fromRGB(255,180,60)
+ task.delay(2.5, function() sendNowLbl.Text=" Send Notify Now"; sendNowLbl.TextColor3=C.TXT end)
+ return
  end
  _whLastSent = tick()
  if _snDone then return end; _snDone = true
