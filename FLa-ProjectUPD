@@ -7064,6 +7064,7 @@ end)
 -- Forward declare raid+webhook functions
 SendWebhookNotif=nil; RebuildRaidList=nil; ParseRaidEntry=nil
 DisconnectRaidConns=nil; ConnectRaidListeners=nil; RaidFireDamage=nil
+DisconnectAscConns=nil; ConnectAscListeners=nil  -- [v72] forward declare ASC listeners
 
 do -- [FIX] webhook + raid logic wrapped to free top-level locals
 
