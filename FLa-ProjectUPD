@@ -1209,7 +1209,7 @@ ASC = {
 _ascOn = false
 _ascWakeup = nil -- BindableEvent untuk wakeup loop
 _visAscension = nil -- visual pill toggle
-_ascBusy = false -- true selama ASC inMap ATAU cooldown -> RAID pause total
+-- [v72] _ascBusy dihapus - tidak diperlukan setelah independence refactor
 _ASC_CHAT_CACHE = {} -- [mapNum] = {grade, bossName} dari chat parser; dipakai ParseRaidEntry
 -- [v56 DEPRECATED] _ascDominatedThisEvent tidak dipakai lagi
 -- Logika baru: RAID standby selama ASC.running=true DAN ResolveAscEntry()~=nil
@@ -1222,7 +1222,7 @@ _ascDominatedThisEvent = false -- tetap ada agar tidak crash referensi lama
 -- _raidFallbackActive: true jika RAID sedang fallback (ASC tidak match di siklus ini)
 --   -> ASC harus standby, tidak boleh "nyuri" RAID sampai siklus event baru datang dari server
 _ascMatchedThisCycle  = false  -- ASC pernah match di siklus event saat ini
-_raidFallbackActive   = false  -- RAID sedang jalan sebagai fallback (ASC tidak match siklus ini)
+-- [v72] _raidFallbackActive dihapus
 
 -- [v62 RINO/RINI FIX] Siapa yang "dipanggil" di siklus event ini.
 -- Diset oleh TriggerEntryWakeup() berdasarkan evaluasi RAID_LIVE sebelum wakeup dikirim.
@@ -2328,9 +2328,7 @@ function WaitRaidDone()
         if ASC and ASC.inMap then
             return true, "Auto Ascension"
         end
-        if ASC and ASC.running and _ascBusy then
-            return true, "Auto Ascension (cooldown)"
-        end
+        -- [v72] _ascBusy dihapus - ASC.inMap sudah cukup sebagai guard
 
         return false, nil
     end
@@ -6901,9 +6899,8 @@ function ParseChatLine(text)
  end
 
  if not _whSilent then TriggerWebhookDebounce() end
- -- [v58] Gunakan debounce terpusat: tunggu 3 detik setelah notif terakhir
- -- baru bangunkan RAID dan ASC bersamaan untuk filter dan masuk
- TriggerEntryWakeup()
+ -- [v72] RAID wakeup mandiri dari chat parser
+ if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
  end
  return
  end
@@ -7316,55 +7313,12 @@ SendWebhookNotif = TriggerWebhookDebounce -- alias untuk kompatibilitas
 --   - Lebih toleran terhadap notif terlambat / out-of-order dari server
 --   - Tetap ada TryClaimMapLock sebagai safety net terakhir
 
-local _entryWakeupTimer = nil  -- handle task.delay aktif
-local _ENTRY_DEBOUNCE_SEC = 3  -- detik tunggu setelah notif terakhir
-
+-- [v72 REMOVED] TriggerEntryWakeup dihapus - RAID dan ASC sekarang independent
+-- RAID bangunkan dirinya sendiri via _raidWakeup
+-- ASC bangunkan dirinya sendiri via _ascWakeup
+-- MODE dispatcher yang mengatur siapa yang dapat slot
 TriggerEntryWakeup = function()
-    -- Reset timer: kalau sudah ada timer berjalan, batalkan dan mulai lagi
-    if _entryWakeupTimer then
-        pcall(function() task.cancel(_entryWakeupTimer) end)
-        _entryWakeupTimer = nil
-    end
-    _entryWakeupTimer = task.delay(_ENTRY_DEBOUNCE_SEC, function()
-        _entryWakeupTimer = nil
-        -- [v61 CYCLEFIX] Reset flag siklus lama
-        _ascMatchedThisCycle = false
-        _raidFallbackActive  = false
-
-        -- ============================================================
-        -- [v62 RINO/RINI FIX] "Si Pemanggil" memutuskan siapa yang dipanggil
-        -- SEBELUM wakeup dikirim ke siapapun:
-        --   Cek RAID_LIVE apakah ada Ascension Tower entry.
-        --   Jika ada + ASC toggle ON  -> _eventOwner = "asc"  -> hanya ASC yang dibangunkan
-        --   Jika tidak / ASC OFF      -> _eventOwner = "raid" -> hanya RAID yang dibangunkan
-        -- Dengan ini tidak ada race: yang tidak dipanggil tidak pernah bangun sama sekali.
-        -- ============================================================
-        local _hasAscEntry = false
-        if ASC and ASC.running then
-            for rid, ent in pairs(RAID_LIVE) do
-                -- rid adalah raidId integer (key tabel RAID_LIVE)
-                local ridAbs = rid < 0 and math.abs(rid) or rid
-                local isAscById  = ridAbs >= 935001
-                local isAscByMap = ent.mapId and ent.mapId >= 50301 and ent.mapId <= 50326
-                local isAscByFlag = ent.isAscension == true
-                if isAscByFlag or isAscById or isAscByMap then
-                    _hasAscEntry = true; break
-                end
-            end
-        end
-
-        if _hasAscEntry then
-            -- ASC dipanggil. RAID tetap duduk.
-            _eventOwner = "asc"
-            _raidFallbackActive = false
-            if _ascWakeup then pcall(function() _ascWakeup:Fire() end) end
-        else
-            -- RAID dipanggil. ASC tetap duduk.
-            _eventOwner = "raid"
-            _raidFallbackActive = true
-            if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
-        end
-    end)
+    -- stub: tidak dipakai lagi, RAID pakai _raidWakeup langsung
 end
 -- ============================================================
 FlushWebhookPending = function()
@@ -7619,8 +7573,8 @@ local function _onRaidChildAdded(child, slotName)
  }
  RebuildRaidList()
  -- [v58] Gunakan debounce terpusat: jangan langsung bangunkan siapapun
- -- TriggerEntryWakeup() akan tunggu 3 detik setelah notif terakhir baru fire RAID & ASC
- if TriggerEntryWakeup then TriggerEntryWakeup() end
+ -- [v72] RAID bangunkan dirinya sendiri
+ if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
  -- [v271] Trigger webhook LANGSUNG saat raid muncul di workspace
  if not _whSilent then
   task.spawn(function()
@@ -7671,7 +7625,8 @@ local function _watchRaidSlot(reFolder)
  if not prev or prev == "?" then
  _runeGradeCache[mn] = grade:upper()
  -- [v58] Gunakan debounce terpusat
- if TriggerEntryWakeup then TriggerEntryWakeup() end
+ -- [v72] RAID wakeup mandiri (tidak lewat TriggerEntryWakeup)
+ if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
  end
  end
  end
@@ -7687,7 +7642,8 @@ local function _watchRaidSlot(reFolder)
  if not prev2 or prev2 == "?" then
  _runeGradeCache[mn2] = g2:upper()
  -- [v58] Gunakan debounce terpusat
- if TriggerEntryWakeup then TriggerEntryWakeup() end
+ -- [v72] RAID wakeup mandiri (tidak lewat TriggerEntryWakeup)
+ if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
  end
  end
  end
@@ -7838,44 +7794,32 @@ ConnectRaidListeners = function()
  end
  RebuildRaidList()
  -- [v58] Gunakan debounce terpusat
- if TriggerEntryWakeup then TriggerEntryWakeup() end
+ -- [v72] RAID wakeup mandiri (tidak lewat TriggerEntryWakeup)
+ if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
  TriggerWebhookDebounce()
  end
  end)
  table.insert(_WH.raidConns, conn)
  end
 
- -- EnterRaidsUpdateInfo: slotIndex + serverMapId saat masuk map
- -- [FIX] Skip event dari Tower/JTP map (50300+) agar tidak mencemari RAID state
+ -- [v72 INDEPENDENT] EnterRaidsUpdateInfo: HANYA tulis ke RAID state
+ -- ASC punya ConnectAscListeners() sendiri - tidak ada cross-write ke ASC dari sini
  if _RE_Enter then
  local conn = _RE_Enter.OnClientEvent:Connect(function(data)
- if type(data) ~= "table" then return end
- -- Abaikan jika tidak ada slotIndex sama sekali (bukan raid event)
- if data.slotIndex == nil and data.fromMapId == nil and data.mapId == nil then return end
- local evMapId = data.mapId or data.fromMapId or 0
- -- [BUG FIX v49] Pisahkan handler Ascension vs RAID Normal secara tegas:
- -- Event dari map 50300+ HANYA boleh diproses jika ASC sedang aktif (ASC.running atau ASC.inMap)
- -- Event dari map 50101-50120 HANYA boleh masuk ke RAID jika ASC.inMap == false
- -- Ini mencegah serverMapId RAID tercemar oleh event Ascension Tower dan sebaliknya
- if evMapId >= 50300 then
-  -- [v64 FIX] Event Ascension Tower: tulis ke ASC.serverMapId (bukan RAID state)
-  if evMapId >= 50301 and evMapId <= 50326 and ASC and (ASC.running or ASC.inMap) then
-   ASC.serverMapId = evMapId
+  if type(data) ~= "table" then return end
+  if data.slotIndex == nil and data.fromMapId == nil and data.mapId == nil then return end
+  local evMapId = data.mapId or data.fromMapId or 0
+  -- Skip event Ascension Tower (50300+) - bukan urusan RAID
+  if evMapId >= 50300 then return end
+  -- Tulis ke RAID state
+  if data.slotIndex then RAID.slotIndex = data.slotIndex end
+  if data.fromMapId then RAID.fromMapId = data.fromMapId end
+  if data.mapId then
+   local mid = data.mapId
+   if mid >= 50101 and mid <= 50120 then
+    RAID.serverMapId = mid
+   end
   end
-  return
- end
- -- Dari sini: event adalah RAID normal (mapId 50101-50120 atau 0)
- -- Guard: jika ASC sedang di dalam map, event ini bisa jadi spurious dari sisi server
- -- Tulis ke RAID state HANYA jika RAID.running dan ASC.inMap = false
- if ASC.inMap then return end
- if data.slotIndex then RAID.slotIndex = data.slotIndex end
- if data.fromMapId then RAID.fromMapId = data.fromMapId end
- if data.mapId then
-  local mid = data.mapId
-  if mid >= 50101 and mid <= 50120 then
-   RAID.serverMapId = mid
-  end
- end
  end)
  table.insert(_WH.raidConns, conn)
  end
@@ -7896,6 +7840,53 @@ task.spawn(function()
  end
  end
 end)
+
+-- ============================================================
+-- [v72 INDEPENDENT] ASC LISTENERS - terpisah penuh dari RAID
+-- ConnectAscListeners: hanya tulis ke ASC.serverMapId
+-- ============================================================
+_WH.ascConns = {}
+
+DisconnectAscConns = function()
+ for _, conn in ipairs(_WH.ascConns) do
+  pcall(function() conn:Disconnect() end)
+ end
+ _WH.ascConns = {}
+end
+
+ConnectAscListeners = function()
+ DisconnectAscConns()
+ local _RE_Enter = Remotes:FindFirstChild("EnterRaidsUpdateInfo")
+ if _RE_Enter then
+  local conn = _RE_Enter.OnClientEvent:Connect(function(data)
+   if type(data) ~= "table" then return end
+   if data.slotIndex == nil and data.fromMapId == nil and data.mapId == nil then return end
+   local evMapId = data.mapId or data.fromMapId or 0
+   -- Hanya proses event Ascension Tower (50301-50326)
+   if evMapId >= 50301 and evMapId <= 50326 then
+    ASC.serverMapId = evMapId
+   end
+  end)
+  table.insert(_WH.ascConns, conn)
+ end
+end
+
+-- Pasang ASC listener saat start
+task.spawn(function() ConnectAscListeners() end)
+
+-- Auto-reconnect ASC listener
+task.spawn(function()
+ local lastRef2 = Remotes:FindFirstChild("EnterRaidsUpdateInfo")
+ while ScreenGui.Parent do
+  task.wait(3)
+  local cur2 = Remotes:FindFirstChild("EnterRaidsUpdateInfo")
+  if cur2 ~= lastRef2 then
+   lastRef2 = cur2
+   if cur2 then ConnectAscListeners() end
+  end
+ end
+end)
+
 --  Helpers 
 function StopRaid()
  _raidInterrupt = false
@@ -7961,8 +7952,8 @@ end
 function StopAscension()
  ASC.running = false
  ASC.inMap   = false
- _ascBusy    = false
- _eventOwner = nil
+ if DisconnectAscConns then pcall(DisconnectAscConns) end  -- [v72] bersihkan listener ASC
+ -- [v72] _ascBusy / _eventOwner removed
  ReleaseMapLock("asc")
  -- [v62 FIX] Reset status label agar tidak nyantol di "Dalam Tower x"
  AscStatusUpdate("OFF", Color3.fromRGB(120,120,120))
@@ -8254,16 +8245,16 @@ function StartAscensionLoop()
      local _pm = ASC.pickMode or "easy"
      -- [v61 CYCLEFIX] Jika RAID sedang fallback di siklus ini, ASC harus standby
      -- Tidak boleh masuk Tower sampai siklus event baru datang (TriggerEntryWakeup reset flag)
-     if _raidFallbackActive and RAID.running then
-      AscStatusUpdate("[Standby] RAID fallback aktif siklus ini - tunggu siklus event baru...", Color3.fromRGB(140,80,200))
-     elseif #ascList == 0 then
-      if RAID.running then
-       AscStatusUpdate("[Standby] Fallback ke Auto Raid - tunggu Ascension Tower...", Color3.fromRGB(140,100,200))
-      else
-       AscStatusUpdate("Waiting Ascension Tower [".._pm.."]...", Color3.fromRGB(140,140,60))
-      end
+     -- [v72] tidak ada koordinasi giliran dengan RAID
+     -- [v72 removed: if _raidFallbackActive and RAID.running]
+     -- [v72 removed: AscStatusUpdate standby RAID fallback]
+     if #ascList == 0 then
+      AscStatusUpdate("Waiting Ascension Tower [" .._pm.. "]...", Color3.fromRGB(140,140,60))
+     -- [v72 removed: elseif RAID.running check]
+     -- [v72 removed]
+     -- [v72 removed]
+     -- [v72 removed]
      elseif _pm == "byrank" and next(ASC.runeGrades or {}) ~= nil then
-      local _gr = {}
       for _, g in ipairs(GRADE_LIST) do if ASC.runeGrades[g] then table.insert(_gr, g) end end
       AscStatusUpdate("Waiting Rank: ["..table.concat(_gr,"] [").."]...", Color3.fromRGB(200,120,255))
      elseif _pm == "bymap" and next(ASC.preferMaps or {}) ~= nil then
@@ -8293,15 +8284,15 @@ function StartAscensionLoop()
       task.wait(0.1); _we = _we + 0.1
      end
      if _wConn then pcall(function() _wConn:Disconnect() end) end
-     -- [v62 RINO/RINI FIX] Jika TriggerEntryWakeup memutuskan ini giliran RAID ("rini"),
-     -- ASC ("rino") tetap duduk. Tidak mencoba resolve apapun sampai siklus berikutnya.
-     if _eventOwner == "raid" and RAID.running then
-      raidEntry = nil  -- ASC standby, RAID yang jalan siklus ini
-     elseif _raidFallbackActive and RAID.running then
-      raidEntry = nil  -- fallback lama (v61 compat)
-     else
+      -- [v72] ASC independent - langsung resolve entry tanpa cek RAID state
+      -- [v72 removed: _eventOwner / _raidFallbackActive logic]
+      -- [v72 removed]
+      -- [v72 removed]
+      -- [v72 removed]
+      -- [v72 removed]
+      -- [v72 removed]
       raidEntry = ResolveAscEntry()
-     end
+      -- [v72 removed: end of old if/elseif block]
     end
     if not ASC.running then break end
     if not raidEntry then break end
@@ -8338,9 +8329,9 @@ function StartAscensionLoop()
     AscStatusUpdate("Masuk: Tower "..mn..bossHint.." ["..raidEntry.grade.."]", Color3.fromRGB(100,200,255))
 
     ASC.inMap = true
-    _ascBusy  = true  -- RAID harus pause total selama ASC aktif (inMap+cooldown)
+    -- [v72] _ascBusy removed
     _ascMatchedThisCycle = true   -- [v61 CYCLEFIX] ASC sudah match di siklus ini
-    _raidFallbackActive  = false  -- [v61 CYCLEFIX] RAID tidak boleh fallback di siklus ini
+    -- [v72] _raidFallbackActive removed
     _ascPending = false -- [v57 FIX] inMap=true sudah cover, tidak perlu pending lagi
     -- [v56 FIX] _ascDominatedThisEvent dihapus - RAID dan ASC sekarang independen
     -- [v52 FIX] Setelah inMap=true di-set, lock tidak diperlukan lagi (IsAnyMapActive sudah cover)
@@ -8515,7 +8506,7 @@ function StartAscensionLoop()
       if RebuildRaidList then pcall(RebuildRaidList) end
       ASC.inMap = false; ReleaseMapLock("asc")
       -- [v64 FIX] Jangan biarkan _ascBusy=true saat gagal masuk -> RAID/MA akan stuck pause
-      _ascBusy = false
+      -- [v72] _ascBusy removed
       AscStatusUpdate("[!] Server reject (ChallengeRaidsFail) - retry...", Color3.fromRGB(255,80,80))
       task.wait(1); break
      end
@@ -8533,7 +8524,7 @@ function StartAscensionLoop()
        if wm >= 50301 and wm <= 50326 then _tpOk = true end
       end
      end)
-     if not _tpOk and #GetRaidEnemies() > 0 then _tpOk = true end
+     if not _tpOk and #GetAscEnemies() > 0 then _tpOk = true end
     end
 
     if not _tpOk and ASC.running then
@@ -8542,7 +8533,7 @@ function StartAscensionLoop()
      if RebuildRaidList then pcall(RebuildRaidList) end
      ASC.inMap = false; ReleaseMapLock("asc")
      -- [v64 FIX] Reset _ascBusy agar RAID/MA tidak stuck pause selamanya saat gagal TP
-     _ascBusy = false
+     -- [v72] _ascBusy removed
      AscStatusUpdate("[!] Gagal masuk Tower - retry...", Color3.fromRGB(255,80,80))
      task.wait(1); break
     end
@@ -8599,7 +8590,7 @@ function StartAscensionLoop()
         if ok2 and type(wm2) == "number" and (wm2 < 50301 or wm2 > 50326) and wm2 > 0 then
          AscStatusUpdate("[!] Watchdog: Player keluar Tower paksa - reset state", Color3.fromRGB(255,80,80))
          ASC.inMap = false
-         _ascBusy = false
+         -- [v72] _ascBusy removed
          ReleaseMapLock("asc")
          break
         end
@@ -8642,8 +8633,8 @@ function StartAscensionLoop()
      while _loadWait < 10 and ASC.running and not _ascDone do
       task.wait(0.5); _loadWait = _loadWait + 0.5
       if _loadWait >= 1 and not _earlyBoss then
-       -- Sumber 1: GetRaidEnemies()
-       local _eList = GetRaidEnemies()
+       -- Sumber 1: GetAscEnemies()
+       local _eList = GetAscEnemies()
        -- Sumber 2: fallback GetEnemiesLocal() kalau kosong
        if #_eList == 0 then _eList = GetEnemiesLocal() end
        for _, e in ipairs(_eList) do
@@ -8716,11 +8707,11 @@ function StartAscensionLoop()
      end))
 
      -- [FIX v50] Cari boss - max 40s (Tower butuh lebih lama dari RAID)
-     -- Pakai GetRaidEnemies() + fallback GetEnemiesLocal() tiap iterasi
+     -- Pakai GetAscEnemies() + fallback GetEnemiesLocal() tiap iterasi
      local waitBoss = 0
      while ASC.running and not boss and waitBoss < 5 and not _ascDone do
-      -- Coba GetRaidEnemies() dulu
-      local _bList = GetRaidEnemies()
+      -- Coba GetAscEnemies() dulu
+      local _bList = GetAscEnemies()
       -- Fallback: kalau kosong (mapId belum update), pakai GetEnemiesLocal()
       if #_bList == 0 then _bList = GetEnemiesLocal() end
       for _, e in ipairs(_bList) do
@@ -9037,23 +9028,23 @@ function StartAscensionLoop()
       else
        local nextEntry = ResolveAscEntry()
        if nextEntry then
-        _ascBusy = true  -- ada Tower baru -> RAID harus pause lagi
+        -- [v72] _ascBusy removed
         break
        end
        -- Tidak ada Tower yang cocok
        if #RAID_ID_LIST == 0 then
         -- Event habis total -> RAID boleh jalan, reset cycle flag
-        _ascBusy = false
+        -- [v72] _ascBusy removed
         _ascMatchedThisCycle = false  -- [v61 CYCLEFIX] siklus habis, reset
-        _raidFallbackActive  = false
-        _eventOwner = nil             -- [v62] reset penentu siapa yang dipanggil
+        -- [v72] _raidFallbackActive removed
+        -- [v72] _eventOwner removed
         AscStatusUpdate("[>>] Menunggu event RAID baru dari server...", Color3.fromRGB(120,120,120))
        elseif #GetAscensionList() > 0 then
         -- Ada Ascension tapi tidak cocok filter (grade/map)
         -- [v61 CYCLEFIX] Jika ASC pernah match di siklus ini, pertahankan _ascBusy
         -- sampai siklus event benar-benar habis (RAID_LIVE kosong)
         if _ascMatchedThisCycle then
-         _ascBusy = true  -- siklus ASC belum selesai, RAID tetap pause
+         -- [v72] _ascBusy removed
          AscStatusUpdate("[||] ASC cycle aktif - RAID standby sampai event habis (".._fw.."s)", Color3.fromRGB(180,100,255))
         else
          AscStatusUpdate("[FLa] Waiting grade filter... (".._fw.."s)", Color3.fromRGB(200,255,150))
@@ -9063,14 +9054,14 @@ function StartAscensionLoop()
         -- [v61 CYCLEFIX] Jika ASC sudah dominasi siklus ini (pernah match),
         -- pertahankan _ascBusy sampai RAID_LIVE kosong (siklus habis)
         if _ascMatchedThisCycle then
-         _ascBusy = true  -- siklus ASC belum habis, RAID tetap pause
+         -- [v72] _ascBusy removed
          AscStatusUpdate("[||] Menunggu siklus event habis - RAID standby (".._fw.."s)", Color3.fromRGB(180,100,255))
         else
          -- ASC tidak pernah match di siklus ini -> lepas _ascBusy, RAID boleh fallback
-         _ascBusy = false
-         _raidFallbackActive = true   -- [v61 CYCLEFIX] tandai RAID sedang fallback
-         _eventOwner = "raid"         -- [v62] giliran RAID di siklus ini
-         if RAID.running then
+         -- [v72] _ascBusy removed
+         -- [v72] _raidFallbackActive removed
+         -- [v72] _eventOwner removed
+          -- [v72] tidak perlu cek RAID.running
           AscStatusUpdate("[Standby] Fallback ke Auto Raid (".._fw.."s)", Color3.fromRGB(140,100,200))
          else
           -- RAID OFF -> diam saja sampai event baru
@@ -9101,11 +9092,11 @@ function StartAscensionLoop()
   -- [v63 FIX] Cleanup dijamin jalan meskipun pcall catch error di dalam loop
   ASC.running = false
   ASC.inMap   = false
-  _ascBusy    = false
+  -- [v72] _ascBusy removed
   _ascOn      = false
   _ascDominatedThisEvent = false -- [v56 DEPRECATED] tidak dipakai lagi
   _ascMatchedThisCycle  = false  -- [v61 CYCLEFIX] reset saat ASC stop
-  _raidFallbackActive   = false  -- [v61 CYCLEFIX] reset saat ASC stop
+  -- [v72] _raidFallbackActive removed
   ASC._rrIdx  = 0
   AscStatusUpdate("Auto Ascension STOP", Color3.fromRGB(160,148,135))
   if ASC.dot then ASC.dot.BackgroundColor3 = Color3.fromRGB(100,100,100) end
@@ -9125,7 +9116,7 @@ function RaidCollectAll()
  local guid = obj:GetAttribute("GUID") or obj:GetAttribute("Guid") or obj:GetAttribute("guid") or obj:GetAttribute("ItemGuid")
  if guid and not collected_guids[guid] then
  collected_guids[guid] = true
- RAID.collected = RAID.collected + 1
+ ASC.collected = ASC.collected + 1
  pcall(function() RE.CollectItem:InvokeServer(guid) end)
  -- [v112-FIX] Nil guard ExtraReward
  if RE.ExtraReward then
@@ -9148,7 +9139,7 @@ function RaidCollectAll()
  local guid = obj:GetAttribute("GUID") or obj:GetAttribute("Guid") or obj:GetAttribute("guid") or obj:GetAttribute("ItemGuid")
  if guid and not collected_guids[guid] then
  collected_guids[guid] = true
- RAID.collected = RAID.collected + 1
+ ASC.collected = ASC.collected + 1
  pcall(function() RE.CollectItem:InvokeServer(guid) end)
  -- [v112-FIX] Nil guard ExtraReward
  if RE.ExtraReward then
@@ -9171,6 +9162,67 @@ end
 -- [GODMODE FIX] Relax filter jarak, tambah fallback scan seluruh workspace
 -- [GODMODE FIX 2] Validasi mapId realtime - pastikan player di dalam raid map
 function GetRaidEnemies()
+ local list = {}
+ local seen = {}
+
+ -- [v51-FIX] Hapus hard early-return berdasarkan MapId — terlalu agresif.
+ -- Guard lama menyebabkan scan gagal saat MapId belum update (race condition Delta Android)
+ -- atau saat workspace.MapId pakai attribute name berbeda dari yang di-read.
+ -- Sekarang: tetap scan workspace, hanya matikan distFilter jika mapId tidak dikenali.
+ local currentMapId = GetCurrentMapId()
+ local _inNormalRaid = currentMapId and (currentMapId >= 50101 and currentMapId <= 50120)
+ local _inAscTower  = currentMapId and (currentMapId >= 50301 and currentMapId <= 50326)
+ -- (tidak ada early return di sini — biarkan scan tetap berjalan)
+
+ -- spawnPos hanya relevan untuk Normal Raid (Ascension Tower tidak pakai RAID_SPAWN_POS)
+ local activeMapId = (_inNormalRaid and RAID and RAID.serverMapId) or nil
+ local spawnPos = activeMapId and RAID_SPAWN_POS and RAID_SPAWN_POS[activeMapId]
+ -- [FIX] Perbesar radius 2000->8000 agar boss yang spawn jauh tetap terdeteksi
+ -- Map 19/20 punya spawnPos 0,0,0 - jika spawnPos tidak valid (magnitude<1), nonaktifkan filter
+ local MAX_DIST = 8000
+ local useDistFilter = spawnPos and spawnPos.Magnitude > 1
+
+ local function addEnemy(e)
+ if not e:IsA("Model") then return end
+ local g = e:GetAttribute("EnemyGuid") or e:GetAttribute("BossGuid") or e:GetAttribute("Guid") or e:GetAttribute("GUID")
+ if not g or seen[g] then return end
+ -- Fallback: beberapa boss (Giant Arachnid, dll) tidak punya HumanoidRootPart
+ -- Coba HumanoidRootPart -> PrimaryPart -> Torso -> UpperTorso -> bagian apapun
+ local hrp = e:FindFirstChild("HumanoidRootPart")
+       or e.PrimaryPart
+       or e:FindFirstChild("Torso")
+       or e:FindFirstChild("UpperTorso")
+       or e:FindFirstChildWhichIsA("BasePart")
+ local hum = e:FindFirstChildOfClass("Humanoid")
+ if not (hrp and hum and hum.Health > 0) then return end
+ if useDistFilter then
+ local dist = (hrp.Position - spawnPos).Magnitude
+ if dist > MAX_DIST then return end
+ end
+ seen[g] = true
+ table.insert(list, {guid=g, hrp=hrp, model=e})
+ end
+
+ -- Scan folder-folder utama
+ for _, fname in ipairs({"Bosses","Boss","RaidBoss","Enemys","Enemy","Enemies","RaidEnemys","Monsters","Monster"}) do
+ local folder = workspace:FindFirstChild(fname)
+ if folder then
+ for _, e in ipairs(folder:GetChildren()) do addEnemy(e) end
+ end
+ end
+
+ -- [GODMODE FIX] Fallback: scan langsung children workspace jika folder tidak ketemu / list kosong
+ if #list == 0 then
+ for _, obj in ipairs(workspace:GetChildren()) do
+ if obj:IsA("Model") then
+ addEnemy(obj)
+ -- Scan nested (beberapa game taruh enemy di sub-model)
+ for _, child in ipairs(obj:GetChildren()) do
+ addEnemy(child)
+ end
+
+-- [v72 INDEPENDENT] GetAscEnemies - salinan mandiri untuk AUTO RAID ASCENSION
+function GetAscEnemies()
  local list = {}
  local seen = {}
 
@@ -9345,7 +9397,8 @@ local function ForceRescanRaidEnter()
         if newFound then
             RebuildRaidList()
             -- [v58] Gunakan debounce terpusat
-            if TriggerEntryWakeup then TriggerEntryWakeup() end
+            -- [v72] RAID wakeup mandiri (tidak lewat TriggerEntryWakeup)
+            if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
             if not _whSilent and TriggerWebhookDebounce then TriggerWebhookDebounce() end
         end
     end)
@@ -9682,28 +9735,12 @@ local function ResolveEntry()
  end
 
  local raidEntry = ResolveEntry()
- -- [v62 RINO/RINI FIX] Keputusan siapa yang "dipanggil" sudah dibuat di TriggerEntryWakeup.
- -- Jika _eventOwner == "asc" berarti siklus ini giliran ASC (Rino), RAID (Rini) tetap duduk.
- -- Fallback: kalau _eventOwner belum diset (nil), pakai cek ResolveAscEntry lama.
- if raidEntry and ASC and ASC.running then
-  if _eventOwner == "asc" then
-   raidEntry = nil -- giliran ASC, RAID standby
-  elseif _eventOwner == nil and ResolveAscEntry and ResolveAscEntry() then
-   raidEntry = nil -- belum ada keputusan, cek manual
-  end
- end
+ -- [v72] RAID tidak perlu cek _eventOwner - MODE dispatcher yang handle giliran
 
  while RAID.running and not raidEntry do
  ForceRescanRaidEnter()
  raidEntry = ResolveEntry()
- -- [v62 RINO/RINI FIX] Cek ulang _eventOwner di setiap iterasi waiting loop
- if raidEntry and ASC and ASC.running then
-  if _eventOwner == "asc" then
-   raidEntry = nil
-  elseif _eventOwner == nil and ResolveAscEntry and ResolveAscEntry() then
-   raidEntry = nil
-  end
- end
+ -- [v72] tidak ada _eventOwner check - RAID masuk kalau MODE berhasil di-acquire
  if not raidEntry then
  -- Prune expired entries
  local _now2 = os.time()
@@ -9720,9 +9757,10 @@ local function ResolveEntry()
  local _pm = RAID.pickMode
  if not IsRaidLiveInGame() then
  RaidStatusUpdate("Empty RAID - Waiting new RAID", Color3.fromRGB(160,100,60))
- elseif ASC and ASC.running and (_eventOwner == "asc" or (ResolveAscEntry and ResolveAscEntry())) then
- -- [v62 RINO/RINI FIX] ASC ON dan siklus ini giliran ASC -> RAID standby
- RaidStatusUpdate("[||] ASC Ascension aktif & ada Tower match - Normal Raid standby...", Color3.fromRGB(180,100,255))
+ elseif ASC and ASC.running and ASC.inMap then
+     -- [v72] ASC.inMap check
+
+ RaidStatusUpdate("[||] ASC Ascension sedang aktif - Raid standby...", Color3.fromRGB(180,100,255))
  elseif _pm == "byrank" and next(RAID.runeGrades) ~= nil then
  local _gr = {}
  for _,g in ipairs(GRADE_LIST) do if RAID.runeGrades[g] then table.insert(_gr,g) end end
@@ -9813,7 +9851,7 @@ local function ResolveEntry()
      -- ResolveAscEntry() = nil -> tidak ada Tower match -> RAID boleh jalan sebagai fallback
      -- [v61 CYCLEFIX] Tandai bahwa RAID jalan sebagai fallback di siklus ini
      -- ASC harus standby dan tidak boleh mencuri sampai siklus baru datang
-     _raidFallbackActive = true
+     -- [v72] _raidFallbackActive removed
  end
 
  local currentWm = workspace:GetAttribute("MapId") or 0
@@ -9910,43 +9948,38 @@ local function ResolveEntry()
                         task.wait(0.3)
                     end
 
-                    -- [LOGIKA KEPUTUSAN 4 HUKUM]
+                    -- [LOGIKA KEPUTUSAN]
                     local pm = RAID.pickMode or "default"
                     local useRune = false
                     local useUpDown = false
-                    
+
                     if pm == "manual" then
-                        if RAID.manualMatchMode == "primary" then
-                            -- TAHAP 1: MATCH PREFERRED RANK -> HANYA RUNE YANG BOLEH JALAN!
-                            if RAID.runeEnabled and RAID.runeMapTarget >= 1 and RAID.runeMapTarget <= 20 then 
-                                -- [SISTEM ANTI-MUBAZIR]
-                                if (raidEntry.mapId - 50000) == RAID.runeMapTarget then
-                                    useRune = false -- Map sudah sama, simpan Rune-nya!
-                                else
-                                    useRune = true 
-                                end
+                        -- [v71 FIX] Di Manual mode, Preferred Rune adalah perintah EKSPLISIT user.
+                        -- useRune = true selama runeEnabled aktif dan map target beda dari map saat ini,
+                        -- TERLEPAS dari manualMatchMode (primary/updown/fallback).
+                        -- Bug lama: useRune hanya true saat manualMatchMode == "primary",
+                        -- padahal "primary" hanya tercapai kalau Preferred Rank juga diset dan ada match.
+                        -- Akibatnya: user yang hanya set Rune tanpa Rank -> selalu fallback -> masuk map terkecil.
+                        if RAID.runeEnabled and RAID.runeMapTarget >= 1 and RAID.runeMapTarget <= 20 then
+                            if (raidEntry.mapId - 50000) == RAID.runeMapTarget then
+                                useRune = false -- Map sudah sama, hemat Rune
                             else
-                                useRune = false
+                                useRune = true
                             end
-                            useUpDown = false -- << MUTLAK MATI DI TAHAP 1 (Gak boleh ikut campur!)
-                            
-                        elseif RAID.manualMatchMode == "updown" then
-                            -- TAHAP 2: MATCH UP/DOWN TARGET -> Rune Mati, UpDown Jalan!
-                            useRune = false
-                            useUpDown = true
-                            
-                        elseif RAID.manualMatchMode == "fallback" then
-                            -- TAHAP 3: JANGAN MAKSA! Keduanya mati.
-                            useRune = false
-                            useUpDown = false
+                        end
+                        -- UpDown hanya jalan di TAHAP 2 (tidak ada rank match, tidak ada rune)
+                        if not useRune then
+                            if RAID.manualMatchMode == "updown" then
+                                useUpDown = true
+                            end
                         end
                     else
-                        -- Mode selain Manual (ByRank, dll)
-                        if RAID.runeEnabled and RAID.runeMapTarget >= 1 and RAID.runeMapTarget <= 20 then 
+                        -- Mode selain Manual (ByRank, ByMap, Default, Easy, Hard)
+                        if RAID.runeEnabled and RAID.runeMapTarget >= 1 and RAID.runeMapTarget <= 20 then
                             if (raidEntry.mapId - 50000) == RAID.runeMapTarget then
                                 useRune = false
                             else
-                                useRune = true 
+                                useRune = true
                             end
                         end
                         if RAID.updownEnabled then useUpDown = true end
@@ -10708,7 +10741,7 @@ local function ResolveEntry()
  RAID.running = false
  RAID.inMap = false
  _raidOn = false
- _raidFallbackActive = false  -- [v61 CYCLEFIX] reset saat RAID stop
+ -- [v72] _raidFallbackActive removed  -- [v61 CYCLEFIX] reset saat RAID stop
  MODE:Release("raid") -- [v257] pastikan MA bisa resume
  RaidStatusUpdate("[FLa] Auto Raid STOP", Color3.fromRGB(160,148,135))
  if RAID.dot then RAID.dot.BackgroundColor3 = Color3.fromRGB(100,100,100) end
