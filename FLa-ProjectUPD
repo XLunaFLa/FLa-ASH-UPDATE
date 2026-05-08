@@ -9208,6 +9208,12 @@ function GetRaidEnemies()
  for _, child in ipairs(obj:GetChildren()) do
  addEnemy(child)
  end
+ end -- end if obj:IsA("Model")
+ end -- end for _, obj
+ end -- end if #list == 0
+
+ return list
+end -- end function GetRaidEnemies
 
 -- [v72 INDEPENDENT] GetAscEnemies - salinan mandiri untuk AUTO RAID ASCENSION
 function GetAscEnemies()
