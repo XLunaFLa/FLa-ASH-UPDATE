@@ -7124,9 +7124,15 @@ _WH.SendRaid = function(url)
  if #raidList == 0 then return end
 
  local function getGrade(entry)
- -- [FIX] AT: towerNum dari mapId-50300, normal: mn dari mapId-50000
+ -- [FIX] AT: towerNum dari mapId normalize -> mapId-50300, normal: mn dari mapId-50000
  local isAT = entry.isAscension == true
- local mn = isAT and ((entry.mapId or 50300) - 50300) or ((entry.mapId or 50000) - 50000)
+ local _mid = entry.mapId or (isAT and 50301 or 50001)
+ if isAT then
+  if _mid >= 50001 and _mid <= 50026 then _mid = _mid + 300 end
+  if _mid >= 50101 and _mid <= 50126 then _mid = _mid + 200 end
+  if _mid >= 50401 and _mid <= 50426 then _mid = _mid - 100 end
+ end
+ local mn = isAT and math.max(1, _mid - 50300) or (_mid - 50000)
  local g = "?"
  if entry.raidId and entry.raidId > 0 and RAID_CONFIG_GRADE then g = RAID_CONFIG_GRADE[entry.raidId] or "?" end
  if g == "?" then g = (GetBestGrade and GetBestGrade(mn, isAT)) or "?" end
@@ -7160,8 +7166,12 @@ _WH.SendRaid = function(url)
  if (GRADE_RANK_W[g] or 0) > (GRADE_RANK_W[topGrade] or 0) then topGrade = g end
  end
  for _, entry in ipairs(atRaids) do
- -- [FIX] mapId Ascension = 50301+N, towerNum = mapId - 50300 (bukan mn-18)
- local towerNum = (entry.mapId or 50300) - 50300
+ -- [FIX] Normalize mapId AT ke range 50301-50326 dulu baru hitung towerNum
+ local _atMapId = entry.mapId or 50301
+ if _atMapId >= 50001 and _atMapId <= 50026 then _atMapId = _atMapId + 300 end
+ if _atMapId >= 50101 and _atMapId <= 50126 then _atMapId = _atMapId + 200 end
+ if _atMapId >= 50401 and _atMapId <= 50426 then _atMapId = _atMapId - 100 end
+ local towerNum = math.max(1, _atMapId - 50300)
  -- [FIX] Grade AT: pakai cacheKey negatif via GetBestGrade(towerNum, true)
  local g = "?"
  if entry.raidId and entry.raidId > 0 and RAID_CONFIG_GRADE then g = RAID_CONFIG_GRADE[entry.raidId] or "?" end
@@ -7192,8 +7202,12 @@ _WH.SendRaid = function(url)
  table.insert(lines, "- Map "..mn.." - "..(MAP_NAMES[mn] or "Map "..mn).." ["..g.."]")
  end
  for _, entry in ipairs(atRaids) do
- -- [FIX] mapId Ascension = 50301+N, towerNum = mapId - 50300
- local towerNum = (entry.mapId or 50300) - 50300
+ -- [FIX] Normalize mapId AT ke range 50301-50326 dulu baru hitung towerNum
+ local _atMapId = entry.mapId or 50301
+ if _atMapId >= 50001 and _atMapId <= 50026 then _atMapId = _atMapId + 300 end
+ if _atMapId >= 50101 and _atMapId <= 50126 then _atMapId = _atMapId + 200 end
+ if _atMapId >= 50401 and _atMapId <= 50426 then _atMapId = _atMapId - 100 end
+ local towerNum = math.max(1, _atMapId - 50300)
  -- [FIX] Grade AT: pakai cacheKey negatif
  local g = "?"
  if entry.raidId and entry.raidId > 0 and RAID_CONFIG_GRADE then g = RAID_CONFIG_GRADE[entry.raidId] or "?" end
@@ -7584,7 +7598,7 @@ end
 -- Child RaidEnterX muncul di RE1001/RE1002 = raid Map X buka
 local function _onRaidChildAdded(child, slotName)
  local mapNum = _parseRaidEnterName(child.Name)
- if not mapNum or mapNum < 1 or mapNum > 20 then return end -- Map 1-20 valid
+ if not mapNum or mapNum < 1 or mapNum > 26 then return end -- Map 1-20 normal, 1-26 AT
  local mapId = 50000 + mapNum
  -- Cek sudah ada entry raidId asli untuk map ini
  for _, ent in pairs(RAID_LIVE) do
@@ -7761,15 +7775,19 @@ ConnectRaidListeners = function()
  -- Jangan buang entry ini hanya karena mapId tidak dikenali
  local _isAscById = (raidId >= 935001)
  if not _isAscMapId and not _isAscById and (mapId < 50001 or mapId > 50020) then break end
- -- Normalize mapId ASC jika datang sebagai in-map range (50401-50426 -> 50301-50326)
+ -- Normalize mapId ASC: server bisa kirim berbagai format
  if _isAscById and not _isAscMapId then
-  if mapId >= 50401 and mapId <= 50426 then mapId = mapId - 100 end
-  if mapId >= 50201 and mapId <= 50226 then mapId = mapId - 100 + 100 end -- safety
-  -- Jika masih tidak dikenali, paksa ke range ASC yang valid berdasarkan mapNum estimasi
+  -- Format: mapId = 50001-50020 (pakai base raid normal, Tower N = mapId 50000+N)
+  if mapId >= 50001 and mapId <= 50026 then mapId = mapId + 300 end -- 50005 -> 50305
+  -- Format: mapId = 50101-50126 (in-map raid, +100 dari base)
+  if mapId >= 50101 and mapId <= 50126 then mapId = mapId + 200 end -- 50105 -> 50305
+  -- Format: mapId = 50401-50426
+  if mapId >= 50401 and mapId <= 50426 then mapId = mapId - 100 end -- 50405 -> 50305
+  -- Format: mapId = 50201-50226
+  if mapId >= 50201 and mapId <= 50226 then mapId = mapId + 100 end -- 50205 -> 50305
+  -- Jika masih tidak dikenali, fallback parsial
   if not (mapId >= 50301 and mapId <= 50326) then
-   -- Fallback: coba parse mapNum dari data lain, default ke Tower 1
-   local _mn = math.max(1, math.min(26, mapId - 50300))
-   if _mn < 1 or _mn > 26 then _mn = 1 end
+   local _mn = math.max(1, math.min(26, math.abs(mapId - 50300)))
    mapId = 50300 + _mn
   end
   _isAscMapId = true
@@ -7779,7 +7797,12 @@ ConnectRaidListeners = function()
  local spawnName = info.spawnName or "RE1001"
  local rank = SPAWN_RANK[spawnName] or 0
  -- [v271] Grade dari RAID_CONFIG_GRADE (formula matematika, cover semua seri)
- local grade = (RAID_CONFIG_GRADE and RAID_CONFIG_GRADE[raidId]) or (_runeGradeCache and _runeGradeCache[mapNum]) or "?"
+ -- [FIX] AT: cache key negatif (-mapNum), RAID normal: positif (mapNum)
+ local _grCacheKey = _isAscMapId and (-mapNum) or mapNum
+ local grade = (RAID_CONFIG_GRADE and RAID_CONFIG_GRADE[raidId])
+  or (_runeGradeCache and _runeGradeCache[_grCacheKey])
+  or (_ASC_CHAT_CACHE and _isAscMapId and _ASC_CHAT_CACHE[mapNum] and _ASC_CHAT_CACHE[mapNum].grade)
+  or "?"
  local tempKey = -(mapId) -- key entry chat Ascension (negatif)
  -- Detect isAscension: 3 sumber (makin akurat, tidak rely on chat saja)
  -- 1. raidId >= 935001 -> pasti Ascension Tower (confirmed SimpleSPY: 936501)
