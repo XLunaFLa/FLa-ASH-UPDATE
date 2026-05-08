@@ -8245,16 +8245,11 @@ function StartAscensionLoop()
      local _pm = ASC.pickMode or "easy"
      -- [v61 CYCLEFIX] Jika RAID sedang fallback di siklus ini, ASC harus standby
      -- Tidak boleh masuk Tower sampai siklus event baru datang (TriggerEntryWakeup reset flag)
-     -- [v72] tidak ada koordinasi giliran dengan RAID
-     -- [v72 removed: if _raidFallbackActive and RAID.running]
-     -- [v72 removed: AscStatusUpdate standby RAID fallback]
+     -- [v72] Status waiting - tidak ada koordinasi giliran dengan RAID
      if #ascList == 0 then
       AscStatusUpdate("Waiting Ascension Tower [" .._pm.. "]...", Color3.fromRGB(140,140,60))
-     -- [v72 removed: elseif RAID.running check]
-     -- [v72 removed]
-     -- [v72 removed]
-     -- [v72 removed]
      elseif _pm == "byrank" and next(ASC.runeGrades or {}) ~= nil then
+      local _gr = {}
       for _, g in ipairs(GRADE_LIST) do if ASC.runeGrades[g] then table.insert(_gr, g) end end
       AscStatusUpdate("Waiting Rank: ["..table.concat(_gr,"] [").."]...", Color3.fromRGB(200,120,255))
      elseif _pm == "bymap" and next(ASC.preferMaps or {}) ~= nil then
@@ -8284,16 +8279,8 @@ function StartAscensionLoop()
       task.wait(0.1); _we = _we + 0.1
      end
      if _wConn then pcall(function() _wConn:Disconnect() end) end
-      -- [v72] ASC independent - langsung resolve entry tanpa cek RAID state
-      -- [v72 removed: _eventOwner / _raidFallbackActive logic]
-      -- [v72 removed]
-      -- [v72 removed]
-      -- [v72 removed]
-      -- [v72 removed]
-      -- [v72 removed]
-      raidEntry = ResolveAscEntry()
-      -- [v72 removed: end of old if/elseif block]
-    end
+     -- [v72] ASC independent - langsung resolve tanpa cek RAID state
+     raidEntry = ResolveAscEntry()
     if not ASC.running then break end
     if not raidEntry then break end
 
@@ -8900,7 +8887,7 @@ function StartAscensionLoop()
        _ascSuccess = true
        _ascDone = true
        AscStatusUpdate("[FLa] Boss Dead!", Color3.fromRGB(100,255,150))
-      end -- if bossPos
+      end -- if ASC.running and bossPos
      else
       -- Boss tidak ditemukan setelah 30s - last chance scan
       if not boss then
