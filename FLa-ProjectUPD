@@ -1195,10 +1195,7 @@ ASC = {
  runeGrades    = {},    -- filter grade (Preferred Rank)
  runeEnabled   = false, -- rune map item aktif (ASC Tower 1-26)
  runeMapTarget = 0,     -- target Tower rune (1-26), 0 = nonaktif
- updownEnabled     = false, -- UP/DOWN Rank toggle
- updownDir         = "up",  -- "up" | "down"
- updownTargetGrade = nil,   -- grade target UP/DOWN
- manualMatchMode   = "none", -- [v48] "primary" | "updown" | "fallback" | "none"
+ manualMatchMode   = "none", -- [v48] "primary" | "fallback" | "none"
  _rrIdx            = 0,      -- [v48] Round-robin index untuk Pick Mode Default
  autoKillBoss = false, -- AUTO BOSS KILL toggle
  bossDelay    = 3,     -- delay sebelum TP ke boss (1-10s)
@@ -2319,14 +2316,11 @@ function WaitRaidDone()
             end
         end
 
-        -- [BUG FIX v49] 4. Auto Ascension Tower - pause MA saat sedang di dalam Tower
-        -- [v64 FIX] Tambahkan cek _ascBusy: MA juga pause saat ASC cooldown dgn Tower tersedia
-        -- Tanpa ini: race condition MA TP vs ASC TP -> player double-TP -> ASC stuck "Dalam Tower"
+        -- 4. Auto Ascension Tower - pause MA HANYA saat player benar-benar di dalam Tower
+        -- [FIX] _ascBusy tidak dipakai di sini - itu untuk RAID biar tidak rebutan masuk
+        -- MA boleh jalan saat ASC cooldown, sama seperti MA + AUTO RAID (RAID.inMap saja yang block)
         if ASC and ASC.inMap then
             return true, "Auto Ascension"
-        end
-        if ASC and ASC.running and _ascBusy then
-            return true, "Auto Ascension (cooldown)"
         end
 
         return false, nil
@@ -7105,44 +7099,51 @@ local function _getReqFunc()
 end
 
 -- Helper: kirim HTTP POST ke Discord atau Telegram
+-- return: true (sukses), false (gagal), string (error message)
 local function _doSend(url, text)
  local reqFunc = _getReqFunc()
  if not reqFunc then
- -- [FIX] Executor tidak support HTTP request - warn ke output
- pcall(function() warn("[ASH Webhook] ERROR: Tidak ada request function! Executor tidak support HTTP.") end)
- return false
+  pcall(function() warn("[ASH Webhook] ERROR: Executor tidak support HTTP request!") end)
+  return false, "Executor tidak support HTTP"
  end
  local HS = game:GetService("HttpService")
  local isDiscord = url:find("discord%.com/api/webhooks")
  local isTelegram = url:find("api%.telegram%.org")
- local ok, res = false, nil
- pcall(function()
- if isDiscord then
- res = reqFunc({
- Url = url,
- Method = "POST",
- Headers = { ["Content-Type"] = "application/json" },
- Body = HS:JSONEncode({ content = text }),
- })
- elseif isTelegram then
- local enc = tostring(text):gsub("([^%w%-_%.%~])", function(c)
- return string.format("%%%02X", string.byte(c))
+ local ok, res, errMsg = false, nil, nil
+ local callOk, callErr = pcall(function()
+  if isDiscord then
+   res = reqFunc({
+    Url = url,
+    Method = "POST",
+    Headers = { ["Content-Type"] = "application/json" },
+    Body = HS:JSONEncode({ content = text }),
+   })
+  elseif isTelegram then
+   local enc = tostring(text):gsub("([^%w%-_%.%~])", function(c)
+    return string.format("%%%02X", string.byte(c))
+   end)
+   res = reqFunc({ Url = url .. "&text=" .. enc, Method = "GET" })
+  end
  end)
- res = reqFunc({ Url = url .. "&text=" .. enc, Method = "GET" })
+ if not callOk then
+  errMsg = "HTTP error: "..(tostring(callErr):sub(1,60))
+  pcall(function() warn("[ASH Webhook] "..errMsg) end)
+  return false, errMsg
  end
- end)
  if res and type(res) == "table" then
- local sc = res.StatusCode or res.status or 0
- ok = (sc >= 200 and sc < 300)
- if not ok then
- ok = false -- Status non-2xx
- end
+  local sc = res.StatusCode or res.status or 0
+  ok = (sc >= 200 and sc < 300)
+  if not ok then
+   errMsg = "HTTP "..sc..(res.Body and (" - "..tostring(res.Body):sub(1,40)) or "")
+   pcall(function() warn("[ASH Webhook] Gagal: "..errMsg) end)
+  end
  elseif res ~= nil then
- ok = true
+  ok = true
  else
- ok = false
+  errMsg = "Tidak ada response dari server"
+  ok = false
  end
- return ok
+ return ok, errMsg
 end
 
 -- Kirim notif Raid ke webhook
@@ -7435,13 +7436,14 @@ _WH.SendCustomMessage = function(url, msg, onDone, onFail)
  if onFail then onFail("Executor tidak support HTTP") end; return
  end
  task.spawn(function()
- local ok = _doSend(url, msg)
- task.wait(0.3)
- if ok then
- if onDone then onDone() end
- else
- if onFail then onFail("Gagal kirim") end
- end
+  local ok, errMsg = _doSend(url, msg)
+  task.wait(0.3)
+  if ok then
+   if onDone then onDone() end
+  else
+   local reason = errMsg or "Gagal kirim"
+   if onFail then onFail(reason) end
+  end
  end)
 end
 
@@ -8149,7 +8151,7 @@ function StartAscensionLoop()
  AscStatusUpdate("Siap. Menunggu Ascension Tower...", Color3.fromRGB(180,180,60))
 
  -- [v48] ResolveAscEntry: Pick Mode logic sama persis dengan AUTO RAID
- -- Mode: default, easy, hard, byrank, bymap, manual (dengan preferMaps, runeGrades, updownEnabled)
+ -- Mode: easy, hard, manual (dengan preferMaps, runeGrades)
  local function ResolveAscEntry()
   local ascList = GetAscensionList()
   if #ascList == 0 then return nil end
@@ -8201,22 +8203,7 @@ function StartAscensionLoop()
     return matched[1]
    end
 
-   -- TAHAP 2: UP/DOWN Target
-   if ASC.updownEnabled and ASC.updownTargetGrade then
-    local udMatched = {}
-    for _, r in ipairs(valid) do
-     if _getGrade(r) == ASC.updownTargetGrade then
-      table.insert(udMatched, r)
-     end
-    end
-    if #udMatched > 0 then
-     sortHighestRank(udMatched)
-     ASC.manualMatchMode = "updown"
-     return udMatched[1]
-    end
-   end
-
-   -- TAHAP 3: Fallback - mapNum terendah
+   -- TAHAP 2: Fallback - mapNum terendah
    ASC.manualMatchMode = "fallback"
    table.sort(valid, function(a,b) return a.mapNum < b.mapNum end)
    return valid[1]
@@ -8269,14 +8256,36 @@ function StartAscensionLoop()
    return low[ASC._rrIdx]
   end
 
-  -- EASY: mapNum terendah
+  -- EASY: Preferred Rank dulu (jika ada), lalu mapNum terendah sebagai fallback
   if pm == "easy" then
+   if next(ASC.runeGrades or {}) ~= nil then
+    local matched = {}
+    for _, r in ipairs(ascList) do
+     if ASC.runeGrades[_getGrade(r)] then table.insert(matched, r) end
+    end
+    if #matched > 0 then
+     table.sort(matched, function(a,b) return a.mapNum < b.mapNum end)
+     return matched[1]
+    end
+   end
+   -- Fallback: tidak ada match Preferred Rank, ambil mapNum terendah
    table.sort(ascList, function(a,b) return a.mapNum < b.mapNum end)
    return ascList[1]
   end
 
-  -- HARD: mapNum tertinggi
+  -- HARD: Preferred Rank dulu (jika ada), lalu mapNum tertinggi sebagai fallback
   if pm == "hard" then
+   if next(ASC.runeGrades or {}) ~= nil then
+    local matched = {}
+    for _, r in ipairs(ascList) do
+     if ASC.runeGrades[_getGrade(r)] then table.insert(matched, r) end
+    end
+    if #matched > 0 then
+     table.sort(matched, function(a,b) return a.mapNum > b.mapNum end)
+     return matched[1]
+    end
+   end
+   -- Fallback: tidak ada match Preferred Rank, ambil mapNum tertinggi
    table.sort(ascList, function(a,b) return a.mapNum > b.mapNum end)
    return ascList[1]
   end
@@ -8343,23 +8352,19 @@ function StartAscensionLoop()
       else
        AscStatusUpdate("Waiting Ascension Tower [".._pm.."]...", Color3.fromRGB(140,140,60))
       end
-     elseif _pm == "byrank" and next(ASC.runeGrades or {}) ~= nil then
+     elseif next(ASC.runeGrades or {}) ~= nil and ASC.runeEnabled and ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 then
+      -- Preferred Rank aktif + Preferred Rune aktif
       local _gr = {}
       for _, g in ipairs(GRADE_LIST) do if ASC.runeGrades[g] then table.insert(_gr, g) end end
-      AscStatusUpdate("Waiting Rank: ["..table.concat(_gr,"] [").."]...", Color3.fromRGB(200,120,255))
-     elseif _pm == "bymap" and next(ASC.preferMaps or {}) ~= nil then
-      local _ms = {}
-      for mn in pairs(ASC.preferMaps) do table.insert(_ms, "Tower "..mn) end
-      table.sort(_ms)
-      AscStatusUpdate("Waiting Map: "..table.concat(_ms,", ").."...", Color3.fromRGB(100,200,100))
-     elseif ASC.runeEnabled and ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 and next(ASC.runeGrades or {}) ~= nil then
-      AscStatusUpdate("Waiting grade cocok -> override Tower "..ASC.runeMapTarget.."...", Color3.fromRGB(200,140,255))
-     elseif ASC.runeEnabled and ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 then
-      AscStatusUpdate("Waiting Ascension apapun -> override Tower "..ASC.runeMapTarget.."...", Color3.fromRGB(147,197,253))
+      AscStatusUpdate("Waiting Rank ["..table.concat(_gr,"||").."]\u2192override Tower "..ASC.runeMapTarget.." [".._pm.."]...", Color3.fromRGB(200,140,255))
      elseif next(ASC.runeGrades or {}) ~= nil then
+      -- Preferred Rank aktif saja
       local _gr2 = {}
       for _, g in ipairs(GRADE_LIST) do if ASC.runeGrades[g] then table.insert(_gr2, g) end end
-      AscStatusUpdate("Waiting grade ["..table.concat(_gr2,"] [").."] [".._pm.."]...", Color3.fromRGB(200,255,150))
+      AscStatusUpdate("Waiting Rank ["..table.concat(_gr2,"||").."]\u2192 [".._pm.."]...", Color3.fromRGB(200,255,150))
+     elseif ASC.runeEnabled and ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 then
+      -- Preferred Rune aktif saja (tanpa Preferred Rank)
+      AscStatusUpdate("Waiting Tower apapun \u2192 override Tower "..ASC.runeMapTarget.." [".._pm.."]...", Color3.fromRGB(147,197,253))
      else
       AscStatusUpdate("Waiting Ascension Tower [".._pm.."]...", Color3.fromRGB(255,200,60))
      end
@@ -8467,56 +8472,25 @@ function StartAscensionLoop()
      [26]=10374, -- Goku Super 4+1
     }
 
-    -- [v64] FUNGSI UP/DOWN RANK (identik RAID)
-    local function DoAscUpDownOverride()
-     if not ASC.updownEnabled or not RE.UseRaidItem then return end
-     local dir = ASC.updownDir or "up"
-     local udId = (dir == "up") and 10270 or 10271
-     AscStatusUpdate("[~] Override: "..dir:upper(), Color3.fromRGB(200,140,255))
-     pcall(function() RE.UseRaidItem:FireServer(udId) end)
-     task.wait(0.3)
-    end
-
-    -- [v64] LOGIKA KEPUTUSAN 4 HUKUM (identik RAID, disesuaikan untuk Tower 1-26)
+    -- [v64] LOGIKA KEPUTUSAN (disesuaikan untuk Tower 1-26)
     local _ascPm = ASC.pickMode or "easy"
-    local useRune  = false
-    local useUpDown = false
+    local useRune = false
 
     if _ascPm == "manual" then
      if ASC.manualMatchMode == "primary" then
-      -- TAHAP 1: MATCH PREFERRED RANK -> HANYA RUNE YANG BOLEH JALAN!
+      -- TAHAP 1: MATCH PREFERRED RANK -> pakai Rune kalau target berbeda
       if ASC.runeEnabled and ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 then
-       -- ANTI-MUBAZIR: Tower sudah sama, simpan item-nya!
-       if mn == ASC.runeMapTarget then
-        useRune = false
-       else
-        useRune = true
-       end
-      else
-       useRune = false
+       useRune = (mn ~= ASC.runeMapTarget)
       end
-      useUpDown = false -- MUTLAK MATI di TAHAP 1
-
-     elseif ASC.manualMatchMode == "updown" then
-      -- TAHAP 2: MATCH UP/DOWN TARGET -> Rune Mati, UpDown Jalan!
-      useRune   = false
-      useUpDown = true
-
-     elseif ASC.manualMatchMode == "fallback" then
-      -- TAHAP 3: JANGAN MAKSA! Keduanya mati.
-      useRune   = false
-      useUpDown = false
+     else
+      -- FALLBACK: jangan paksa item apapun
+      useRune = false
      end
     else
-     -- Mode selain Manual (easy, hard, byrank, bymap, default)
+     -- Mode easy / hard
      if ASC.runeEnabled and ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 then
-      if mn == ASC.runeMapTarget then
-       useRune = false -- Tower sudah sama, tidak perlu item
-      else
-       useRune = true
-      end
+      useRune = (mn ~= ASC.runeMapTarget)
      end
-     if ASC.updownEnabled then useUpDown = true end
     end
 
     -- [v64] EKSEKUSI (identik RAID - hanya RUNE_IDS dan mapId berbeda)
@@ -8526,9 +8500,6 @@ function StartAscensionLoop()
      AscStatusUpdate("Create Team...", C.ACC2)
      if RE.CreateRaidTeam then pcall(function() RE.CreateRaidTeam:InvokeServer(raidEntry.id) end) end
      task.wait(0.2)
-
-     -- Prioritas: Rune dulu, lalu UpDown
-     if useUpDown then DoAscUpDownOverride() end
 
      AscStatusUpdate("Use Item (Tower "..targetTower..")...", Color3.fromRGB(255,200,60))
      local itemId = ASC_RUNE_IDS[targetTower]
@@ -8569,8 +8540,6 @@ function StartAscensionLoop()
      end
      task.wait(0.2)
      if not ASC.running then ASC.inMap = false; break end
-
-     if useUpDown then DoAscUpDownOverride() end
 
      -- Sama persis RAID: StartChallengeRaidMap({mapId=targetMapId})
      local _cfail = false
@@ -11930,141 +11899,7 @@ do
   _activeDDClose=function() popup:Destroy(); DDLayer.Visible=false end
  end)
 
- -- ============================================================
- -- ROW 8: UP/DOWN RANK
- -- ============================================================
- local ascUdHdr = Label(ascInner,"UP/DOWN RANK",10,C.TXT3,Enum.Font.GothamBold)
- ascUdHdr.LayoutOrder = 8; ascUdHdr.Size = UDim2.new(1,0,0,14)
 
- local ascUdCard = Frame(ascInner,C.SURFACE,UDim2.new(1,0,0,76))
- ascUdCard.LayoutOrder = 9; Corner(ascUdCard,10); Stroke(ascUdCard,C.BORD,1.5,0.3)
-
- local ascUdRowTop = Frame(ascUdCard,C.BLACK,UDim2.new(1,0,0,38))
- ascUdRowTop.BackgroundTransparency=1; ascUdRowTop.Position=UDim2.new(0,0,0,0)
-
- local ascUdPill = Btn(ascUdRowTop,C.PILL_OFF,UDim2.new(0,52,0,30))
- ascUdPill.AnchorPoint=Vector2.new(1,0.5); ascUdPill.Position=UDim2.new(1,-12,0.5,0); Corner(ascUdPill,13)
- local ascUdKnob = Frame(ascUdPill,C.KNOB_OFF,UDim2.new(0,24,0,24))
- ascUdKnob.AnchorPoint=Vector2.new(0,0.5); ascUdKnob.Position=UDim2.new(0,3,0.5,0); Corner(ascUdKnob,10)
- local ascUdLbl = Label(ascUdRowTop,"UP/DOWN Rank",14,C.TXT,Enum.Font.GothamBold)
- ascUdLbl.Size=UDim2.new(1,-68,0,20); ascUdLbl.Position=UDim2.new(0,14,0.5,-10)
-
- -- Dropdown Arah (UP/DOWN)
- if not ASC.updownDir then ASC.updownDir="up" end
- local ascUdRowBot = Frame(ascUdCard,C.BLACK,UDim2.new(1,0,0,36))
- ascUdRowBot.BackgroundTransparency=1; ascUdRowBot.Position=UDim2.new(0,0,0,38)
- New("UIListLayout",{Parent=ascUdRowBot,FillDirection=Enum.FillDirection.Horizontal,
-  SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,6),VerticalAlignment=Enum.VerticalAlignment.Center})
- Instance.new("UIPadding",ascUdRowBot).PaddingLeft=UDim.new(0,10)
-
- local ascDirDDBtn = Btn(ascUdRowBot,C.BG3,UDim2.new(0,100,0,26))
- ascDirDDBtn.LayoutOrder=1; Corner(ascDirDDBtn,6); Stroke(ascDirDDBtn,C.BORD,1.5,0.25)
- local ascDirDDLbl = Label(ascDirDDBtn,ASC.updownDir=="up" and " UP (UP)" or " DOWN (DN)",11,C.ACC,Enum.Font.GothamBold)
- ascDirDDLbl.Size=UDim2.new(1,0,1,0)
-
- local ascGradeDDBtn = Btn(ascUdRowBot,C.BG3,UDim2.new(1,-120,0,26))
- ascGradeDDBtn.LayoutOrder=2; Corner(ascGradeDDBtn,6); Stroke(ascGradeDDBtn,C.BORD,1.5,0.25)
- local ascGradeDDLbl = Label(ascGradeDDBtn, ASC.updownTargetGrade and (" Target: ["..ASC.updownTargetGrade.."]") or " -- SELECT TARGET --", 11, ASC.updownTargetGrade and C.ACC2 or C.TXT3, Enum.Font.GothamBold)
- ascGradeDDLbl.Size=UDim2.new(1,-20,1,0)
- local ascGradeArr = Label(ascGradeDDBtn,"v",10,C.TXT3,Enum.Font.GothamBold,Enum.TextXAlignment.Center)
- ascGradeArr.Size=UDim2.new(0,18,1,0); ascGradeArr.Position=UDim2.new(1,-20,0,0)
-
- local function updateAscUpDownToggle()
-  local on=ASC.updownEnabled
-  TweenService:Create(ascUdPill,TweenInfo.new(0.16),{BackgroundColor3=on and C.PILL_ON or C.PILL_OFF}):Play()
-  TweenService:Create(ascUdKnob,TweenInfo.new(0.16),{
-   Position=on and UDim2.new(1,-27,0.5,0) or UDim2.new(0,3,0.5,0),
-   BackgroundColor3=on and C.KNOB_ON or C.KNOB_OFF,
-  }):Play()
- end
- updateAscUpDownToggle()
-
- ascUdPill.MouseButton1Click:Connect(function()
-  ASC.updownEnabled=not ASC.updownEnabled; updateAscUpDownToggle()
- end)
-
- -- Dropdown arah UP/DOWN
- ascDirDDBtn.MouseButton1Click:Connect(function()
-  CloseActiveDD()
-  local dirOpts={
-   {label=" UP (UP)", dir="up", col=Color3.fromRGB(100,220,100)},
-   {label=" DOWN (DN)", dir="down", col=Color3.fromRGB(255,100,100)},
-  }
-  local aP=ascDirDDBtn.AbsolutePosition; local aS=ascDirDDBtn.AbsoluteSize; local IH=28
-  local popup=Instance.new("Frame")
-  popup.Parent=DDLayer; popup.BackgroundColor3=C.DD_BG; popup.BorderSizePixel=0
-  popup.Size=UDim2.new(0,aS.X+10,0,#dirOpts*(IH+2)+12)
-  popup.Position=UDim2.new(0,aP.X,0,aP.Y+aS.Y+3)
-  popup.ZIndex=9999; Corner(popup,10); Stroke(popup,C.BORD2,1.5,0.85)
-  local ll=Instance.new("UIListLayout",popup); ll.Padding=UDim.new(0,2); ll.SortOrder=Enum.SortOrder.LayoutOrder
-  Instance.new("UIPadding",popup).PaddingTop=UDim.new(0,4)
-  for _,opt in ipairs(dirOpts) do
-   local d=opt.dir
-   local item=Instance.new("TextButton",popup); item.Size=UDim2.new(1,-8,0,IH)
-   local isSel=ASC.updownDir==d
-   item.BackgroundColor3=isSel and C.SURFACE or C.BG3; item.BackgroundTransparency=isSel and 0.18 or 0.42
-   item.BorderSizePixel=0; item.Text=""; item.AutoButtonColor=false; item.ZIndex=9999
-   Instance.new("UICorner",item).CornerRadius=UDim.new(0,6)
-   local iL=Instance.new("TextLabel",item); iL.Size=UDim2.new(1,-8,1,0); iL.Position=UDim2.new(0,8,0,0)
-   iL.BackgroundTransparency=1; iL.Text=opt.label; iL.TextSize=11; iL.Font=Enum.Font.GothamBold
-   iL.TextColor3=opt.col; iL.TextXAlignment=Enum.TextXAlignment.Left; iL.ZIndex=9999
-   item.MouseButton1Click:Connect(function()
-    CloseActiveDD(); ASC.updownDir=d; ascDirDDLbl.Text=opt.label; ascDirDDLbl.TextColor3=opt.col
-   end)
-  end
-  DDLayer.Visible=true; _activeDDClose=function() popup:Destroy(); DDLayer.Visible=false end
- end)
-
- -- Dropdown target grade UP/DOWN
- local ascClearRow = nil -- forward
- ascGradeDDBtn.MouseButton1Click:Connect(function()
-  CloseActiveDD()
-  local gl=GRADE_LIST or {"E","D","C","B","A","S","SS","G","N","M","M+","M++","XM","ULT"}
-  local IH=28; local SFH=math.min(#gl*(IH+4)+44,260)
-  local ab=ascGradeDDBtn.AbsolutePosition; local sz=ascGradeDDBtn.AbsoluteSize
-  local cam=workspace.CurrentCamera; local vpH=cam and cam.ViewportSize.Y or 800
-  local goUp=(ab.Y+SFH+8 > vpH*0.85)
-  local popup=Instance.new("Frame")
-  popup.Parent=DDLayer; popup.BackgroundColor3=C.DD_BG; popup.BorderSizePixel=0
-  popup.Size=UDim2.new(0,sz.X,0,SFH+8)
-  if goUp then popup.Position=UDim2.new(0,ab.X,0,ab.Y-SFH-12)
-  else popup.Position=UDim2.new(0,ab.X,0,ab.Y+sz.Y+4) end
-  popup.ZIndex=9999; Corner(popup,10); Stroke(popup,C.BORD,1.5,0.3)
-  local sf=Instance.new("ScrollingFrame",popup)
-  sf.Size=UDim2.new(1,0,0,SFH); sf.BackgroundTransparency=1; sf.BorderSizePixel=0
-  sf.ScrollBarThickness=4; sf.CanvasSize=UDim2.new(0,0,0,#gl*(IH+4)+44); sf.ZIndex=9999
-  local sfp=Instance.new("UIPadding",sf); sfp.PaddingTop=UDim.new(0,4); sfp.PaddingLeft=UDim.new(0,4); sfp.PaddingRight=UDim.new(0,4)
-  local sfl=Instance.new("UIListLayout",sf); sfl.SortOrder=Enum.SortOrder.LayoutOrder; sfl.Padding=UDim.new(0,4)
-  -- Clear button
-  local cRow=Instance.new("TextButton",sf); cRow.Size=UDim2.new(1,-8,0,IH); cRow.LayoutOrder=0
-  cRow.BackgroundColor3=not ASC.updownTargetGrade and C.SURFACE or C.DD_BG
-  cRow.BackgroundTransparency=not ASC.updownTargetGrade and 0.18 or 0.42
-  cRow.BorderSizePixel=0; cRow.Text=""; cRow.AutoButtonColor=false; cRow.ZIndex=9999
-  Instance.new("UICorner",cRow).CornerRadius=UDim.new(0,6)
-  local cLbl=Instance.new("TextLabel",cRow); cLbl.Size=UDim2.new(1,-8,1,0); cLbl.Position=UDim2.new(0,8,0,0)
-  cLbl.BackgroundTransparency=1; cLbl.Text="-- CLEAR --"; cLbl.TextSize=10
-  cLbl.Font=Enum.Font.GothamBold; cLbl.TextColor3=not ASC.updownTargetGrade and C.ACC2 or C.TXT3
-  cLbl.TextXAlignment=Enum.TextXAlignment.Left; cLbl.ZIndex=9999
-  cRow.MouseButton1Click:Connect(function()
-   ASC.updownTargetGrade=nil; CloseActiveDD()
-   ascGradeDDLbl.Text=" -- SELECT TARGET --"; ascGradeDDLbl.TextColor3=C.TXT3
-  end)
-  for i,g in ipairs(gl) do
-   local selGrade=g; local col=GRADE_COLORS_ASC[g] or C.ACC; local isSel=(ASC.updownTargetGrade==g)
-   local item=Instance.new("TextButton",sf); item.Size=UDim2.new(1,-8,0,IH); item.LayoutOrder=i
-   item.BackgroundColor3=isSel and C.SURFACE or C.DD_BG; item.BackgroundTransparency=isSel and 0.18 or 0.42
-   item.BorderSizePixel=0; item.Text=""; item.AutoButtonColor=false; item.ZIndex=9999
-   Instance.new("UICorner",item).CornerRadius=UDim.new(0,6)
-   local il=Instance.new("TextLabel",item); il.Size=UDim2.new(1,-8,1,0); il.Position=UDim2.new(0,8,0,0)
-   il.BackgroundTransparency=1; il.Text=" ["..g.."] Rank "..g; il.TextSize=11; il.Font=Enum.Font.GothamBold
-   il.TextColor3=isSel and Color3.fromRGB(255,255,255) or col; il.TextXAlignment=Enum.TextXAlignment.Left; il.ZIndex=9999
-   item.MouseButton1Click:Connect(function()
-    CloseActiveDD(); ASC.updownTargetGrade=selGrade
-    ascGradeDDLbl.Text=" Target: ["..selGrade.."]"; ascGradeDDLbl.TextColor3=C.ACC2
-   end)
-  end
-  DDLayer.Visible=true; _activeDDClose=function() popup:Destroy(); DDLayer.Visible=false end
- end)
 
  -- ============================================================
  -- ROW 10: AUTO BOSS KILL TOGGLE
@@ -15049,15 +14884,15 @@ do
  testBtn.MouseButton1Click:Connect(function()
  _webhookUrl = urlBox.Text:match("^%s*(.-)%s*$") or ""
  UpdatePlatformLbl()
- local msg = "[FLa]"..(_webhookMode or "both"):upper()
+ local msg = "\u2705 **[ASH GUI - FLa Project]** Test Webhook berhasil!\n> Mode: `"..(_webhookMode or "both"):upper().."`\n> Webhook aktif dan siap menerima notifikasi Raid/Siege."
  testLbl.Text="[..] Sending..."; testLbl.TextColor3=Color3.fromRGB(255,220,60)
- -- [FIX] Timeout UI 1s: kalau tidak ada callback dalam 1s, reset label
+ -- [FIX] Timeout UI 10s: HTTP Discord butuh 1-3 detik, jangan timeout terlalu cepat
  local _done = false
- task.delay(1, function()
+ task.delay(10, function()
  if not _done then
  _done = true
- testLbl.Text="[!] Timeout"; testLbl.TextColor3=Color3.fromRGB(255,80,60)
- task.delay(2.5, function() testLbl.Text=" Test Webhook"; testLbl.TextColor3=C.TXT end)
+ testLbl.Text="[!] Timeout/No HTTP"; testLbl.TextColor3=Color3.fromRGB(255,80,60)
+ task.delay(3, function() testLbl.Text=" Test Webhook"; testLbl.TextColor3=C.TXT end)
  end
  end)
  _WH.SendCustomMessage(_webhookUrl, msg,
