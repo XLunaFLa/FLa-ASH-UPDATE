@@ -4626,9 +4626,7 @@ do
   FireAttack(g, pos)
   FireAllDamage(g, pos)
   FireHeroRemotes(g, pos)
-  FireAttack(g, pos)
-  FireAllDamage(g, pos)
-  FireHeroRemotes(g, pos)
+  task.wait(1) -- 1x per detik
  end
 
  local function FHeroF(g)
@@ -4684,7 +4682,7 @@ do
    end
    if RA.cur and not IsDeadF(RA.cur) and RA.cur.model.Parent then
     FCharF(RA.cur.guid, RA.cur.hrp.Position)
-    tpT = tpT + task.wait(0)
+    tpT = tpT + task.wait(0.1)
     if tpT>=1 and not TA.running then tpT=1; TpToF(RA.cur) end
    else
     task.wait(0.5)
@@ -4722,7 +4720,7 @@ do
  TA.cur = tgt
  if tgt.guid~=lastGuid then lastGuid=tgt.guid; TpToF(tgt); tpT=1 end
  FCharF(tgt.guid, tgt.hrp.Position)
- tpT = tpT + task.wait()
+ tpT = tpT + task.wait(0.1)
  if tpT>=0 then tpT=0; TpToF(tgt) end
  if onStatus then onStatus(">> ["..targetName.."] Kill: "..TA.killed) end
  else
