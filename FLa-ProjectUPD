@@ -6860,7 +6860,9 @@ function ParseChatLine(text)
  local cacheKey = isAscension and (-mapNum) or mapNum
  local prev = _runeGradeCache[cacheKey]
  local cleanPrev = prev and prev:match("^([^%s%(]+)") or prev
- local shouldUpdate = not prev or cleanPrev == "?" or (GRADE_RANK[grade] and GRADE_RANK[cleanPrev] and GRADE_RANK[grade] > GRADE_RANK[cleanPrev])
+ -- [FIX] AT: selalu update (setiap notif = raid baru, grade bisa lebih rendah dari sebelumnya)
+ -- Normal: hanya update kalau grade >= grade sebelumnya (bisa ada duplikat notif)
+ local shouldUpdate = isAscension or not prev or cleanPrev == "?" or (GRADE_RANK[grade] and GRADE_RANK[cleanPrev] and GRADE_RANK[grade] > GRADE_RANK[cleanPrev])
  if shouldUpdate then _runeGradeCache[cacheKey] = grade end
 
  if isAscension then
@@ -7164,7 +7166,7 @@ _WH.SendRaid = function(url)
  local mn = (entry.mapId or 50000) - 50000
  local name = MAP_NAMES[mn] or ("Map "..mn)
  local g = getGrade(entry)
- table.insert(lines_normal, "Map "..mn.." - "..name.." ["..g.."]")
+ table.insert(lines_normal, "The MaFissure appeared in "..mn..","..name.." ["..g.."]")
  if (GRADE_RANK_W[g] or 0) > (GRADE_RANK_W[topGrade] or 0) then topGrade = g end
  end
  for _, entry in ipairs(atRaids) do
@@ -7180,7 +7182,7 @@ _WH.SendRaid = function(url)
  if g == "?" then g = (GetBestGrade and GetBestGrade(towerNum, true)) or "?" end
  if g == "?" then g = entry.grade or "?" end
  local _bn = entry.bossName and (entry.bossName:gsub("^%l",string.upper)) or nil
- local atLabel = "Ascension Tower "..towerNum..(_bn and (" - ".._bn) or "").." ["..g.."]"
+ local atLabel = "Ascension Tower "..towerNum.." - [Monarch] "..(_bn or "?").." ["..g.."]"
  table.insert(lines_at, atLabel)
  if (GRADE_RANK_W[g] or 0) > (GRADE_RANK_W[topGrade] or 0) then topGrade = g end
  end
@@ -7201,7 +7203,7 @@ _WH.SendRaid = function(url)
  for _, entry in ipairs(normalRaids) do
  local mn = (entry.mapId or 50000) - 50000
  local g = getGrade(entry)
- table.insert(lines, "- Map "..mn.." - "..(MAP_NAMES[mn] or "Map "..mn).." ["..g.."]")
+ table.insert(lines, "The MaFissure appeared in "..mn..","..(MAP_NAMES[mn] or "Map "..mn).." ["..g.."]")
  end
  for _, entry in ipairs(atRaids) do
  -- [FIX] Normalize mapId AT ke range 50301-50326 dulu baru hitung towerNum
@@ -7216,7 +7218,7 @@ _WH.SendRaid = function(url)
  if g == "?" then g = (GetBestGrade and GetBestGrade(towerNum, true)) or "?" end
  if g == "?" then g = entry.grade or "?" end
  local _bn = entry.bossName and (entry.bossName:gsub("^%l",string.upper)) or nil
- table.insert(lines, "- Ascension Tower "..towerNum..(_bn and (" - ".._bn) or "").." ["..g.."]")
+ table.insert(lines, "Ascension Tower "..towerNum.." - [Monarch] "..(_bn or "?").." ["..g.."]")
  end
  _doSend(url, table.concat(lines, "\n"))
  end
@@ -7757,9 +7759,22 @@ ConnectRaidListeners = function()
  if type(raidInfos) ~= "table" then return end
 
  if action == "RemoveRaidEnters" then
- for k in pairs(raidInfos) do
+ for k, info in pairs(raidInfos) do
  local raidId = type(k)=="number" and k or tonumber(k)
- if raidId then RAID_LIVE[raidId] = nil end
+ if raidId then
+  local ent = RAID_LIVE[raidId]
+  -- [FIX] Clear grade cache AT saat raid tutup agar tidak cemari raid baru
+  if ent and ent.isAscension and ent.mapId then
+   local _mn = ent.mapId >= 50301 and (ent.mapId - 50300)
+    or (ent.mapId >= 50001 and ent.mapId <= 50026 and (ent.mapId - 50000))
+    or nil
+   if _mn then
+    if _runeGradeCache then _runeGradeCache[-_mn] = nil end
+    if _ASC_CHAT_CACHE then _ASC_CHAT_CACHE[_mn] = nil end
+   end
+  end
+  RAID_LIVE[raidId] = nil
+ end
  end
  RebuildRaidList()
  else
