@@ -9046,15 +9046,9 @@ function StartAscensionLoop()
          AscStatusUpdate("[||] Menunggu siklus event habis - RAID standby (".._fw.."s)", Color3.fromRGB(180,100,255))
         else
          -- ASC tidak pernah match di siklus ini -> lepas _ascBusy, RAID boleh fallback
-         -- [v72] _ascBusy removed
-         -- [v72] _raidFallbackActive removed
-         -- [v72] _eventOwner removed
-          -- [v72] tidak perlu cek RAID.running
-          AscStatusUpdate("[Standby] Fallback ke Auto Raid (".._fw.."s)", Color3.fromRGB(140,100,200))
-         else
-          -- RAID OFF -> diam saja sampai event baru
-          AscStatusUpdate("[FLa] Waiting Ascension Tower... (".._fw.."s)", Color3.fromRGB(160,120,60))
-         end
+         -- [v72] _ascBusy removed / _raidFallbackActive removed / _eventOwner removed
+         -- [v72] tidak perlu cek RAID.running
+         AscStatusUpdate("[Standby] Fallback ke Auto Raid (".._fw.."s)", Color3.fromRGB(140,100,200))
         end
        end
       end
