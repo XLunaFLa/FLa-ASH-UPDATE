@@ -6880,6 +6880,23 @@ function ParseChatLine(text)
  if _runeGradeCache and grade and grade ~= "?" then
   _runeGradeCache[-mapNum] = grade
  end
+ -- [FIX TIMING] Jika RAID_LIVE sudah punya entry AT ini dengan grade "?",
+ -- update langsung sekarang (server data datang lebih dulu dari chat)
+ if grade and grade ~= "?" then
+  for _rid, _ent in pairs(RAID_LIVE) do
+   if _ent.isAscension and _ent.mapId then
+    local _mn2 = (_ent.mapId >= 50301 and _ent.mapId <= 50326) and (_ent.mapId - 50300) or nil
+    if _mn2 == mapNum and (_ent.grade == "?" or not _ent.grade) then
+     _ent.grade = grade
+     local _bn = _ent.bossName or (_ascBossName) or nil
+     if _bn then _ent.bossName = _bn end
+     _ent.label = "Ascension Tower ".._mn2..(_ent.bossName and (" - "..(_ent.bossName:gsub("^%l",string.upper))) or "").." ["..grade.."]\r
+"
+    end
+   end
+  end
+  if RebuildRaidList then pcall(RebuildRaidList) end
+ end
  -- Jangan buat entry RAID_LIVE di sini - tunggu server
  else
  -- Update isAscension = false untuk entry normal di RAID_LIVE
@@ -7516,6 +7533,7 @@ ParseRaidEntry = function(k, info)
  local _ascCacheKey = isAscEntry and (-mapNum) or nil
  local grade = (RAID_CONFIG_GRADE and RAID_CONFIG_GRADE[raidId])
   or (_ascCacheKey and _runeGradeCache and _runeGradeCache[_ascCacheKey])
+  or (isAscEntry and _ASC_CHAT_CACHE and _ASC_CHAT_CACHE[mapNum] and _ASC_CHAT_CACHE[mapNum].grade)
   or (_runeGradeCache and _runeGradeCache[mapNum])
   or "?"
  local rankLbl = grade ~= "?" and ("["..grade.."]") or "[?]"
@@ -7859,11 +7877,17 @@ ConnectRaidListeners = function()
  }
  -- Kalau ada entry temp Ascension dari chat (negatif), replace dengan raidId asli server
  if RAID_LIVE[tempKey] then
+  -- Preserve grade dari temp entry jika entryData masih "?"
+  if grade == "?" and RAID_LIVE[tempKey].grade and RAID_LIVE[tempKey].grade ~= "?" then
+   entryData.grade = RAID_LIVE[tempKey].grade
+   entryData.label = entryData.label:gsub("%[%?%]", "["..RAID_LIVE[tempKey].grade.."]")
+  end
   RAID_LIVE[raidId] = entryData
   RAID_LIVE[tempKey] = nil
  elseif not RAID_LIVE[raidId] then
-  -- Entry baru dari server: ParseRaidEntry handle ini (sudah fix, hanya cek tempKey)
-  ParseRaidEntry(k, info)
+  -- Entry baru dari server: langsung pakai entryData (grade sudah dihitung di atas)
+  -- termasuk fallback _ASC_CHAT_CACHE dan _runeGradeCache
+  RAID_LIVE[raidId] = entryData
  else
   -- Sudah ada entry: update grade/rank/label, preserve isAscension yang sudah true
   RAID_LIVE[raidId].grade = grade
