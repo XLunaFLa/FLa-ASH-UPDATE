@@ -8244,15 +8244,15 @@ function StartAscensionLoop()
       -- Preferred Rank aktif + Preferred Rune aktif
       local _gr = {}
       for _, g in ipairs(GRADE_LIST) do if ASC.runeGrades[g] then table.insert(_gr, g) end end
-      AscStatusUpdate("Waiting Rank ["..table.concat(_gr,"||").."]\u2192override Tower "..ASC.runeMapTarget.." [".._pm.."]...", Color3.fromRGB(200,140,255))
+      AscStatusUpdate("Waiting Rank ["..table.concat(_gr,"||").."]->override Tower "..ASC.runeMapTarget.." [".._pm.."]...", Color3.fromRGB(200,140,255))
      elseif next(ASC.runeGrades or {}) ~= nil then
       -- Preferred Rank aktif saja
       local _gr2 = {}
       for _, g in ipairs(GRADE_LIST) do if ASC.runeGrades[g] then table.insert(_gr2, g) end end
-      AscStatusUpdate("Waiting Rank ["..table.concat(_gr2,"||").."]\u2192 [".._pm.."]...", Color3.fromRGB(200,255,150))
+      AscStatusUpdate("Waiting Rank ["..table.concat(_gr2,"||").."]-> [".._pm.."]...", Color3.fromRGB(200,255,150))
      elseif ASC.runeEnabled and ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 then
       -- Preferred Rune aktif saja (tanpa Preferred Rank)
-      AscStatusUpdate("Waiting Tower apapun \u2192 override Tower "..ASC.runeMapTarget.." [".._pm.."]...", Color3.fromRGB(147,197,253))
+      AscStatusUpdate("Waiting Tower apapun -> override Tower "..ASC.runeMapTarget.." [".._pm.."]...", Color3.fromRGB(147,197,253))
      else
       AscStatusUpdate("Waiting Ascension Tower [".._pm.."]...", Color3.fromRGB(255,200,60))
      end
@@ -14788,7 +14788,7 @@ do
  testBtn.MouseButton1Click:Connect(function()
  _webhookUrl = urlBox.Text:match("^%s*(.-)%s*$") or ""
  UpdatePlatformLbl()
- local msg = "\u2705 **[ASH GUI - FLa Project]** Test Webhook berhasil!\n> Mode: `"..(_webhookMode or "both"):upper().."`\n> Webhook aktif dan siap menerima notifikasi Raid/Siege."
+ local msg = "[OK] **[ASH GUI - FLa Project]** Test Webhook berhasil!\n> Mode: `"..(_webhookMode or "both"):upper().."`\n> Webhook aktif dan siap menerima notifikasi Raid/Siege."
  testLbl.Text="[..] Sending..."; testLbl.TextColor3=Color3.fromRGB(255,220,60)
  -- [FIX] Timeout UI 10s: HTTP Discord butuh 1-3 detik, jangan timeout terlalu cepat
  local _done = false
