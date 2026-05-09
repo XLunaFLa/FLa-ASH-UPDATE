@@ -7192,13 +7192,29 @@ _WH.SendRaid = function(url)
  return g
  end
 
- local normalRaids, atRaids = {}, {}
+ -- Normal Raid: dari RAID_LIVE (exclude AT)
+ local normalRaids = {}
  for _, entry in ipairs(raidList) do
- -- [FIX Map 20] Gunakan flag isAscension dari entry, bukan mn >= 20
- -- Map 20 normal (raidId positif) harus masuk normalRaids, bukan atRaids
- local isAT = entry.isAscension == true or (entry.raidId and entry.raidId < 0) or (entry.raidId and entry.raidId >= 935001)
- if isAT then table.insert(atRaids, entry)
- else table.insert(normalRaids, entry) end
+ local isAT = entry.isAscension == true or (entry.raidId and entry.raidId >= 935001)
+ if not isAT then table.insert(normalRaids, entry) end
+ end
+
+ -- AT: langsung dari _ASC_CHAT_CACHE (rawText = persis teks game)
+ local atLines = {}
+ local topATGrade = "E"
+ if _ASC_CHAT_CACHE then
+ -- Kumpulkan dan sort by towerNum
+ local atEntries = {}
+ for towerNum, cache in pairs(_ASC_CHAT_CACHE) do
+  if cache and cache.rawText then
+   table.insert(atEntries, {towerNum=towerNum, rawText=cache.rawText, grade=cache.grade or "?"})
+  end
+ end
+ table.sort(atEntries, function(a,b) return a.towerNum < b.towerNum end)
+ for _, ae in ipairs(atEntries) do
+  table.insert(atLines, ae.rawText)
+  if (GRADE_RANK_W[ae.grade] or 0) > (GRADE_RANK_W[topATGrade] or 0) then topATGrade = ae.grade end
+ end
  end
 
  local isDiscord = url:find("discord%.com/api/webhooks")
@@ -7209,57 +7225,38 @@ _WH.SendRaid = function(url)
 
  if isDiscord then
  local topGrade = "E"
- local lines_normal, lines_at = {}, {}
+ local lines_normal = {}
  for _, entry in ipairs(normalRaids) do
- local mn = (entry.mapId or 50000) - 50000
- local name = MAP_NAMES[mn] or ("Map "..mn)
- local g = getGrade(entry)
- table.insert(lines_normal, "The MaFissure appeared in "..mn..","..name.." ["..g.."]")
- if (GRADE_RANK_W[g] or 0) > (GRADE_RANK_W[topGrade] or 0) then topGrade = g end
+  local mn = (entry.mapId or 50000) - 50000
+  local name = MAP_NAMES[mn] or ("Map "..mn)
+  local g = getGrade(entry)
+  table.insert(lines_normal, "The MaFissure appeared in "..mn..","..name.." ["..g.."]")
+  if (GRADE_RANK_W[g] or 0) > (GRADE_RANK_W[topGrade] or 0) then topGrade = g end
  end
- for _, entry in ipairs(atRaids) do
- -- Ambil towerNum untuk lookup cache
- local _atMapId = entry.mapId or 50301
- if _atMapId >= 50001 and _atMapId <= 50026 then _atMapId = _atMapId + 300 end
- if _atMapId >= 50101 and _atMapId <= 50126 then _atMapId = _atMapId + 200 end
- if _atMapId >= 50401 and _atMapId <= 50426 then _atMapId = _atMapId - 100 end
- local towerNum = math.max(1, _atMapId - 50300)
- -- Ambil rawText dari chat cache langsung - paling akurat
- local _cache = _ASC_CHAT_CACHE and _ASC_CHAT_CACHE[towerNum]
- local atLabel = (_cache and _cache.rawText) or ("Ascension Tower "..towerNum..(entry.bossName and (" - [Monarch] "..entry.bossName) or ""))
- -- Grade untuk topGrade tracking
- local g = (_cache and _cache.grade) or entry.grade or "?"
- table.insert(lines_at, atLabel)
- if (GRADE_RANK_W[g] or 0) > (GRADE_RANK_W[topGrade] or 0) then topGrade = g end
- end
+ -- Pakai topATGrade untuk title jika lebih tinggi
+ if (GRADE_RANK_W[topATGrade] or 0) > (GRADE_RANK_W[topGrade] or 0) then topGrade = topATGrade end
  local color = GRADE_COLOR[topGrade] or GRADE_COLOR["E"]
+ local totalCount = #normalRaids + #atLines
  local fields = {}
  if #lines_normal > 0 then
- table.insert(fields, {name="[Normal Raid] ("..#lines_normal..")", value=table.concat(lines_normal,"\n"), inline=false})
+  table.insert(fields, {name="[Normal Raid] ("..#lines_normal..")", value=table.concat(lines_normal,"\n"), inline=false})
  end
- if #lines_at > 0 then
- table.insert(fields, {name="[Ascension Tower] ("..#lines_at..")", value=table.concat(lines_at,"\n"), inline=false})
+ if #atLines > 0 then
+  table.insert(fields, {name="[Ascension Tower] ("..#atLines..")", value=table.concat(atLines,"\n"), inline=false})
  end
- local payload = {embeds={{title="[RAID OPEN] Rank "..topGrade, description="Total: **"..#raidList.."** raid aktif", color=color, fields=fields, footer={text="ASH GUI FLa Project"}}}}
+ local payload = {embeds={{title="[RAID OPEN] Rank "..topGrade, description="Total: **"..totalCount.."** raid aktif", color=color, fields=fields, footer={text="ASH GUI FLa Project"}}}}
  pcall(function()
- reqFunc({Url=url, Method="POST", Headers={["Content-Type"]="application/json"}, Body=HS:JSONEncode(payload)})
+  reqFunc({Url=url, Method="POST", Headers={["Content-Type"]="application/json"}, Body=HS:JSONEncode(payload)})
  end)
  elseif isTelegram then
  local lines = {"[RAID OPEN]"}
  for _, entry in ipairs(normalRaids) do
- local mn = (entry.mapId or 50000) - 50000
- local g = getGrade(entry)
- table.insert(lines, "The MaFissure appeared in "..mn..","..(MAP_NAMES[mn] or "Map "..mn).." ["..g.."]")
+  local mn = (entry.mapId or 50000) - 50000
+  local g = getGrade(entry)
+  table.insert(lines, "The MaFissure appeared in "..mn..","..(MAP_NAMES[mn] or "Map "..mn).." ["..g.."]")
  end
- for _, entry in ipairs(atRaids) do
- local _atMapId = entry.mapId or 50301
- if _atMapId >= 50001 and _atMapId <= 50026 then _atMapId = _atMapId + 300 end
- if _atMapId >= 50101 and _atMapId <= 50126 then _atMapId = _atMapId + 200 end
- if _atMapId >= 50401 and _atMapId <= 50426 then _atMapId = _atMapId - 100 end
- local towerNum = math.max(1, _atMapId - 50300)
- local _cache = _ASC_CHAT_CACHE and _ASC_CHAT_CACHE[towerNum]
- local atLabel = (_cache and _cache.rawText) or ("Ascension Tower "..towerNum..(entry.bossName and (" - [Monarch] "..entry.bossName) or ""))
- table.insert(lines, atLabel)
+ for _, al in ipairs(atLines) do
+  table.insert(lines, al)
  end
  _doSend(url, table.concat(lines, "\n"))
  end
