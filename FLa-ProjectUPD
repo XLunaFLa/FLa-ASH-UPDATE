@@ -2715,6 +2715,7 @@ _ASH_ORN.MACHINES = {
  {name="Shadowhunter Blessing",machineId=400004},
  {name="Primordial Blessing", machineId=400005},
  {name="Monarch Power", machineId=400006},
+ {name="Saiyan Blessing", machineId=400007},
 }
 
 _ASH_ORN.QUIRK_LIST = {}
@@ -2726,16 +2727,16 @@ end
 
 
 _ASH_ORN.STATE = {
- running = {false,false,false,false,false,false},
- targets = {{},{},{},{},{},{}},
- statLbls = {nil,nil,nil,nil,nil,nil},
- dotRefs = {nil,nil,nil,nil,nil,nil},
- attemptLbls = {nil,nil,nil,nil,nil,nil},
- lastLbls = {nil,nil,nil,nil,nil,nil},
- sumLbls = {nil,nil,nil,nil,nil,nil},
- toggleBtns = {nil,nil,nil,nil,nil,nil},
- toggleKnobs = {nil,nil,nil,nil,nil,nil},
- enOnFlags = {false,false,false,false,false,false},
+ running = {false,false,false,false,false,false,false},
+ targets = {{},{},{},{},{},{},{}},
+ statLbls = {nil,nil,nil,nil,nil,nil,nil},
+ dotRefs = {nil,nil,nil,nil,nil,nil,nil},
+ attemptLbls = {nil,nil,nil,nil,nil,nil,nil},
+ lastLbls = {nil,nil,nil,nil,nil,nil,nil},
+ sumLbls = {nil,nil,nil,nil,nil,nil,nil},
+ toggleBtns = {nil,nil,nil,nil,nil,nil,nil},
+ toggleKnobs = {nil,nil,nil,nil,nil,nil,nil},
+ enOnFlags = {false,false,false,false,false,false,false},
 }
 ORN = _ASH_ORN.STATE
 
