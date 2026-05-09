@@ -7298,12 +7298,24 @@ TriggerWebhookDebounce = function()
     _G.SentSiegeIds = _G.SentSiegeIds or {}
     
     local hasNew = false
-    
+
     -- 1. Cek apakah ada ID Raid baru yang belum pernah dikirim
     if RAID_LIVE then
         for id, _ in pairs(RAID_LIVE) do
             if not _G.SentRaidIds[id] then
                 _G.SentRaidIds[id] = true
+                hasNew = true
+            end
+        end
+    end
+
+    -- 1b. Cek AT dari _ASC_CHAT_CACHE (AT tidak selalu masuk RAID_LIVE)
+    if _ASC_CHAT_CACHE then
+        _G.SentATKeys = _G.SentATKeys or {}
+        for towerNum, cache in pairs(_ASC_CHAT_CACHE) do
+            local key = tostring(towerNum)..(cache.rawText or "")
+            if not _G.SentATKeys[key] then
+                _G.SentATKeys[key] = true
                 hasNew = true
             end
         end
@@ -7325,8 +7337,8 @@ TriggerWebhookDebounce = function()
 
     if _whDebounce then pcall(function() task.cancel(_whDebounce) end) end
 
-    -- [v271] Debounce 1 detik (turun dari 3s) agar lebih responsif
-    _whDebounce = task.delay(1, function()
+    -- Debounce 2.5 detik agar _ASC_CHAT_CACHE sempat terisi sebelum kirim
+    _whDebounce = task.delay(2.5, function()
         _whDebounce = nil
         -- [v271] Cooldown 10 detik (turun dari 30s) agar tidak terlalu lambat
         if (tick() - _whLastSent) < 10 then return end
@@ -7335,7 +7347,7 @@ TriggerWebhookDebounce = function()
         task.spawn(function()
             local mode = _webhookMode or "both"
             local url = _webhookUrl
-            local hasRaid = next(RAID_LIVE or {}) ~= nil
+            local hasRaid = next(RAID_LIVE or {}) ~= nil or (_ASC_CHAT_CACHE and next(_ASC_CHAT_CACHE) ~= nil)
             local hasSiege = SIEGE and SIEGE.live and next(SIEGE.live) ~= nil
 
             if (mode == "raid" or mode == "both") and hasRaid then
