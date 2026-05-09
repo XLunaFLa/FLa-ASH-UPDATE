@@ -1211,6 +1211,7 @@ _ascWakeup = nil -- BindableEvent untuk wakeup loop
 _visAscension = nil -- visual pill toggle
 _ascBusy = false -- true selama ASC inMap ATAU cooldown -> RAID pause total
 _ASC_CHAT_CACHE = {} -- [mapNum] = {grade, bossName} dari chat parser; dipakai ParseRaidEntry
+_RAID_LINES     = {} -- raw text dari TipsFloatingPanel untuk webhook
 -- [v56 DEPRECATED] _ascDominatedThisEvent tidak dipakai lagi
 -- Logika baru: RAID standby selama ASC.running=true DAN ResolveAscEntry()~=nil
 -- RAID boleh jalan HANYA kalau ResolveAscEntry()=nil (tidak ada Tower match di event saat ini)
@@ -6901,85 +6902,42 @@ function ParseChatLine(text)
  return
  end
 
---  Deduplicate seen messages (v273 FIX: Short-term memory 3 minutes)
+-- _RAID_LINES: koleksi raw text dari TipsFloatingPanel untuk webhook
+-- key = teks itu sendiri (dedup otomatis), value = tick() saat diterima
+_RAID_LINES = {}
+
 local _chatSeen = {}
--- Buffer untuk AT multiline: baris 1 belum punya grade, tunggu baris 2
-local _atLineBuf = nil  -- {text=..., time=...}
 local function _processMsg(raw)
     if type(raw) ~= "string" or #raw < 5 then return end
     local txt = raw:gsub("<[^>]+>",""):gsub("[\r\n]+"," "):match("^%s*(.-)%s*$") or raw
 
+    -- Strip prefix system jika ada
     local function hasKW(s)
-        return s:find("MaFissure",1,true) or s:find("appeared in",1,true) or s:find("has begun",1,true)
+        return s:find("MaFissure",1,true) or s:find("appeared in",1,true)
     end
-
-    -- Cek apakah ini lanjutan baris AT (tidak ada keyword, tapi ada grade)
-    local function isATContinuation(s)
-        -- Baris seperti "Grendal+1 [E]" atau "Antares [N]" - ada grade, tidak ada keyword raid
-        local hasGrade = s:match("%[M%+%+%]") or s:match("%[M%+%]") or s:match("%[SS%]") or
-            s:match("%[XM%]") or s:match("%[ULT%]") or s:match("%[GOD%]") or
-            s:match("%[[EDCBAGSNMedcbagsn]%]")
-        return hasGrade and not hasKW(s)
-    end
-
-    -- Cek apakah AT baris 1 yang belum lengkap (ada "Ascension Tower" tapi tidak ada grade)
-    local function isATLine1(s)
-        if not s:find("Ascension Tower",1,true) then return false end
-        local hasGrade = s:match("%[M%+%+%]") or s:match("%[M%+%]") or s:match("%[SS%]") or
-            s:match("%[XM%]") or s:match("%[ULT%]") or s:match("%[GOD%]") or
-            s:match("%[[EDCBAGSNMedcbagsn]%]")
-        return not hasGrade
-    end
-
-    local now = tick()
-
-    -- Gabungkan lanjutan AT jika buffer aktif dan belum expired (2 detik)
-    if _atLineBuf and (now - _atLineBuf.time) < 2 then
-        if isATContinuation(txt) then
-            -- Gabung: baris 1 + " " + baris 2
-            txt = _atLineBuf.text .. " " .. txt
-            _atLineBuf = nil
-            -- lanjut proses txt yang sudah lengkap
-        else
-            -- Baris baru bukan lanjutan - proses buffer lama as-is dulu, baru proses yg baru
-            ParseChatLine(_atLineBuf.text)
-            _atLineBuf = nil
-        end
-    elseif _atLineBuf and (now - _atLineBuf.time) >= 2 then
-        -- Buffer expired, proses as-is
-        ParseChatLine(_atLineBuf.text)
-        _atLineBuf = nil
-    end
-
     if not hasKW(txt) then
         local stripped = txt:match("^[^:]+:%s*(.+)$")
         if stripped and hasKW(stripped) then txt = stripped end
     end
     if not hasKW(txt) then return end
 
-    -- AT baris 1 tanpa grade: buffer dan tunggu baris 2
-    if isATLine1(txt) then
-        _atLineBuf = {text=txt, time=now}
-        return
-    end
-
-    -- [v273 FIX] Unique key: gunakan seluruh teks (max 200) agar membedakan map/grade
+    local now = tick()
     local key = txt:sub(1,200)
-
-    -- [v273 FIX] Short-term memory: 3 menit (180 detik)
-    if _chatSeen[key] and (now - _chatSeen[key]) < 180 then
-        return
-    end
-
+    if _chatSeen[key] and (now - _chatSeen[key]) < 180 then return end
     _chatSeen[key] = now
+
+    -- Simpan ke _RAID_LINES untuk webhook
+    _RAID_LINES[key] = now
+
+    -- Tetap parse untuk RAID_LIVE dan grade cache
     ParseChatLine(txt)
 
-    -- Cleanup cache lama setiap 10 pesan baru (agar memori tidak bocor)
+    -- Cleanup
     local count = 0
     for _ in pairs(_chatSeen) do count = count + 1 end
-    if count > 50 then
+    if count > 100 then
         for k, t in pairs(_chatSeen) do
-            if (now - t) > 180 then _chatSeen[k] = nil end
+            if (now - t) > 180 then _chatSeen[k] = nil; _RAID_LINES[k] = nil end
         end
     end
 end
@@ -7161,7 +7119,6 @@ end
 
 -- Kirim notif Raid ke webhook
 _WH.SendRaid = function(url)
- -- [v272] Grade colors Discord embed
  local GRADE_COLOR = {
  ["E"]=9868950,["D"]=6604900,["C"]=5294200,["B"]=6589695,
  ["A"]=11822335,["S"]=16757810,["SS"]=16768000,["G"]=16742440,
@@ -7170,52 +7127,38 @@ _WH.SendRaid = function(url)
  }
  local GRADE_RANK_W = {["E"]=1,["D"]=2,["C"]=3,["B"]=4,["A"]=5,["S"]=6,["SS"]=7,["G"]=8,["N"]=9,["M"]=10,["M+"]=11,["M++"]=12,["XM"]=15,["ULT"]=17,["GOD"]=18}
 
- local raidList = {}
- for _, entry in pairs(RAID_LIVE or {}) do table.insert(raidList, entry) end
- table.sort(raidList, function(a,b) return (a.mapId or 0) < (b.mapId or 0) end)
- if #raidList == 0 then return end
+ -- Kumpulkan semua teks raid dari _RAID_LINES, sort by waktu
+ if not _RAID_LINES or not next(_RAID_LINES) then return end
 
- local function getGrade(entry)
- -- [FIX] AT: towerNum dari mapId normalize -> mapId-50300, normal: mn dari mapId-50000
- local isAT = entry.isAscension == true
- local _mid = entry.mapId or (isAT and 50301 or 50001)
- if isAT then
-  if _mid >= 50001 and _mid <= 50026 then _mid = _mid + 300 end
-  if _mid >= 50101 and _mid <= 50126 then _mid = _mid + 200 end
-  if _mid >= 50401 and _mid <= 50426 then _mid = _mid - 100 end
+ local entries = {}
+ for txt, t in pairs(_RAID_LINES) do
+  table.insert(entries, {txt=txt, t=t})
  end
- local mn = isAT and math.max(1, _mid - 50300) or (_mid - 50000)
- local g = "?"
- if entry.raidId and entry.raidId > 0 and RAID_CONFIG_GRADE then g = RAID_CONFIG_GRADE[entry.raidId] or "?" end
- if g == "?" then g = (GetBestGrade and GetBestGrade(mn, isAT)) or "?" end
- if g == "?" then g = entry.grade or "?" end
- return g
- end
+ table.sort(entries, function(a,b) return a.txt < b.txt end)
 
- -- Normal Raid: dari RAID_LIVE (exclude AT)
- local normalRaids = {}
- for _, entry in ipairs(raidList) do
- local isAT = entry.isAscension == true or (entry.raidId and entry.raidId >= 935001)
- if not isAT then table.insert(normalRaids, entry) end
- end
-
- -- AT: langsung dari _ASC_CHAT_CACHE (rawText = persis teks game)
- local atLines = {}
- local topATGrade = "E"
- if _ASC_CHAT_CACHE then
- -- Kumpulkan dan sort by towerNum
- local atEntries = {}
- for towerNum, cache in pairs(_ASC_CHAT_CACHE) do
-  if cache and cache.rawText then
-   table.insert(atEntries, {towerNum=towerNum, rawText=cache.rawText, grade=cache.grade or "?"})
+ -- Pisahkan normal raid dan AT
+ local lines_normal, lines_at = {}, {}
+ local topGrade = "E"
+ for _, e in ipairs(entries) do
+  local txt = e.txt
+  -- Strip prefix 'The MaFissure appeared in ' untuk tampilan bersih
+  local display = txt:match("appeared in (.+)$") or txt
+  if txt:find("Ascension Tower",1,true) then
+   table.insert(lines_at, display)
+  else
+   table.insert(lines_normal, display)
   end
+  -- Ambil grade untuk topGrade
+  local g = txt:match("%[M%+%+%]") and "M++" or txt:match("%[M%+%]") and "M+"
+   or txt:match("%[SS%]") and "SS" or txt:match("%[XM%]") and "XM"
+   or txt:match("%[ULT%]") and "ULT" or txt:match("%[GOD%]") and "GOD"
+   or txt:match("%[([EDCBAGSNMedcbagsn])%]") or nil
+  if g then g = g:upper() end
+  if g and (GRADE_RANK_W[g] or 0) > (GRADE_RANK_W[topGrade] or 0) then topGrade = g end
  end
- table.sort(atEntries, function(a,b) return a.towerNum < b.towerNum end)
- for _, ae in ipairs(atEntries) do
-  table.insert(atLines, ae.rawText)
-  if (GRADE_RANK_W[ae.grade] or 0) > (GRADE_RANK_W[topATGrade] or 0) then topATGrade = ae.grade end
- end
- end
+
+ local totalCount = #lines_normal + #lines_at
+ if totalCount == 0 then return end
 
  local isDiscord = url:find("discord%.com/api/webhooks")
  local isTelegram = url:find("api%.telegram%.org")
@@ -7224,41 +7167,23 @@ _WH.SendRaid = function(url)
  if not reqFunc then return end
 
  if isDiscord then
- local topGrade = "E"
- local lines_normal = {}
- for _, entry in ipairs(normalRaids) do
-  local mn = (entry.mapId or 50000) - 50000
-  local name = MAP_NAMES[mn] or ("Map "..mn)
-  local g = getGrade(entry)
-  table.insert(lines_normal, "The MaFissure appeared in "..mn..","..name.." ["..g.."]")
-  if (GRADE_RANK_W[g] or 0) > (GRADE_RANK_W[topGrade] or 0) then topGrade = g end
- end
- -- Pakai topATGrade untuk title jika lebih tinggi
- if (GRADE_RANK_W[topATGrade] or 0) > (GRADE_RANK_W[topGrade] or 0) then topGrade = topATGrade end
- local color = GRADE_COLOR[topGrade] or GRADE_COLOR["E"]
- local totalCount = #normalRaids + #atLines
- local fields = {}
- if #lines_normal > 0 then
-  table.insert(fields, {name="[Normal Raid] ("..#lines_normal..")", value=table.concat(lines_normal,"\n"), inline=false})
- end
- if #atLines > 0 then
-  table.insert(fields, {name="[Ascension Tower] ("..#atLines..")", value=table.concat(atLines,"\n"), inline=false})
- end
- local payload = {embeds={{title="[RAID OPEN] Rank "..topGrade, description="Total: **"..totalCount.."** raid aktif", color=color, fields=fields, footer={text="ASH GUI FLa Project"}}}}
- pcall(function()
-  reqFunc({Url=url, Method="POST", Headers={["Content-Type"]="application/json"}, Body=HS:JSONEncode(payload)})
- end)
+  local color = GRADE_COLOR[topGrade] or GRADE_COLOR["E"]
+  local fields = {}
+  if #lines_normal > 0 then
+   table.insert(fields, {name="[Normal Raid] ("..#lines_normal..")", value=table.concat(lines_normal,"\n"), inline=false})
+  end
+  if #lines_at > 0 then
+   table.insert(fields, {name="[Ascension Tower] ("..#lines_at..")", value=table.concat(lines_at,"\n"), inline=false})
+  end
+  local payload = {embeds={{title="[RAID OPEN] Rank "..topGrade, description="Total: **"..totalCount.."** raid aktif", color=color, fields=fields, footer={text="ASH GUI FLa Project"}}}}
+  pcall(function()
+   reqFunc({Url=url, Method="POST", Headers={["Content-Type"]="application/json"}, Body=HS:JSONEncode(payload)})
+  end)
  elseif isTelegram then
- local lines = {"[RAID OPEN]"}
- for _, entry in ipairs(normalRaids) do
-  local mn = (entry.mapId or 50000) - 50000
-  local g = getGrade(entry)
-  table.insert(lines, "The MaFissure appeared in "..mn..","..(MAP_NAMES[mn] or "Map "..mn).." ["..g.."]")
- end
- for _, al in ipairs(atLines) do
-  table.insert(lines, al)
- end
- _doSend(url, table.concat(lines, "\n"))
+  local lines = {"[RAID OPEN] Rank "..topGrade}
+  for _, l in ipairs(lines_normal) do table.insert(lines, l) end
+  for _, l in ipairs(lines_at) do table.insert(lines, l) end
+  _doSend(url, table.concat(lines, "\n"))
  end
 end
 SendWebhookRaid = function(url) _WH.SendRaid(url) end -- alias internal
@@ -7290,66 +7215,17 @@ local _whLastSent = 0
 
 TriggerWebhookDebounce = function()
     if not _webhookEnabled or not _webhookUrl or _webhookUrl == "" then return end
-    
-    -- ==========================================
-    -- [SISTEM INGATAN ANTI-SPAM DISCORD]
-    -- ==========================================
-    _G.SentRaidIds = _G.SentRaidIds or {}
-    _G.SentSiegeIds = _G.SentSiegeIds or {}
-    
-    local hasNew = false
-
-    -- 1. Cek apakah ada ID Raid baru yang belum pernah dikirim
-    if RAID_LIVE then
-        for id, _ in pairs(RAID_LIVE) do
-            if not _G.SentRaidIds[id] then
-                _G.SentRaidIds[id] = true
-                hasNew = true
-            end
-        end
-    end
-
-    -- 1b. Cek AT dari _ASC_CHAT_CACHE (AT tidak selalu masuk RAID_LIVE)
-    if _ASC_CHAT_CACHE then
-        _G.SentATKeys = _G.SentATKeys or {}
-        for towerNum, cache in pairs(_ASC_CHAT_CACHE) do
-            local key = tostring(towerNum)..(cache.rawText or "")
-            if not _G.SentATKeys[key] then
-                _G.SentATKeys[key] = true
-                hasNew = true
-            end
-        end
-    end
-    
-    -- 2. Cek apakah ada ID Siege baru yang belum pernah dikirim
-    if SIEGE and SIEGE.live then
-        for id, _ in pairs(SIEGE.live) do
-            if not _G.SentSiegeIds[id] then
-                _G.SentSiegeIds[id] = true
-                hasNew = true
-            end
-        end
-    end
-    
-    -- 3. HUKUM MUTLAK: Jika tidak ada ID baru, BATALKAN PENGIRIMAN! (Diam)
-    if not hasNew then return end
-    -- ==========================================
-
     if _whDebounce then pcall(function() task.cancel(_whDebounce) end) end
-
-    -- Debounce 2.5 detik agar _ASC_CHAT_CACHE sempat terisi sebelum kirim
-    _whDebounce = task.delay(2.5, function()
+    -- Debounce 3 detik: tunggu semua notif raid masuk dulu ke _RAID_LINES
+    _whDebounce = task.delay(3, function()
         _whDebounce = nil
-        -- [v271] Cooldown 10 detik (turun dari 30s) agar tidak terlalu lambat
         if (tick() - _whLastSent) < 10 then return end
         _whLastSent = tick()
-
         task.spawn(function()
             local mode = _webhookMode or "both"
             local url = _webhookUrl
-            local hasRaid = next(RAID_LIVE or {}) ~= nil or (_ASC_CHAT_CACHE and next(_ASC_CHAT_CACHE) ~= nil)
+            local hasRaid = _RAID_LINES and next(_RAID_LINES) ~= nil
             local hasSiege = SIEGE and SIEGE.live and next(SIEGE.live) ~= nil
-
             if (mode == "raid" or mode == "both") and hasRaid then
                 SendWebhookRaid(url)
             end
