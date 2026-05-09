@@ -5520,6 +5520,8 @@ do
  local x100Knob = Frame(x100Pill,C.TXT,UDim2.new(0,18,0,18))
  x100Knob.Position=UDim2.new(0,2,0.5,-9); Corner(x100Knob,9)
  _HR_RPT.x100 = false
+ _HR_RPT.x100Thread = nil
+
  local function SetX100UI(on)
   TweenService:Create(x100Pill,TweenInfo.new(0.15),{BackgroundColor3=on and C.PILL_ON or C.BG3}):Play()
   TweenService:Create(x100Knob,TweenInfo.new(0.15),{
@@ -5527,9 +5529,105 @@ do
    BackgroundColor3=on and Color3.fromRGB(255,255,255) or C.TXT,
   }):Play()
  end
+
+ local function StopX100()
+  _HR_RPT.x100 = false
+  SetX100UI(false)
+  if _HR_RPT.x100Thread then
+   pcall(function() task.cancel(_HR_RPT.x100Thread) end)
+   _HR_RPT.x100Thread = nil
+  end
+  for i = 1, 3 do _HR_RPT.SetSlot(i, "Idle", Color3.fromRGB(160,148,135)) end
+ end
+
+ local function StartX100Loop()
+  if _HR_RPT.x100Thread then
+   pcall(function() task.cancel(_HR_RPT.x100Thread) end)
+  end
+  _HR_RPT.x100Thread = task.spawn(function()
+   -- Tunggu GUID tersedia
+   if not (_HR_RPT.guid and _HR_RPT.guid ~= "") then
+    for i=1,3 do _HR_RPT.SetSlot(i,"[..] Klik 1x di Mesin Reroll dulu",Color3.fromRGB(180,220,255)) end
+    while _HR_RPT.x100 and not (_HR_RPT.guid and _HR_RPT.guid ~= "") do task.wait(0.5) end
+    if not _HR_RPT.x100 then return end
+    task.wait(1.5)
+   end
+   -- Validasi remote
+   if not RE.AutoHeroQuirk then
+    for i=1,3 do _HR_RPT.SetSlot(i,"[!] Remote AutoRandomHeroQuirk nil",Color3.fromRGB(255,80,80)) end
+    StopX100(); return
+   end
+   local attempt = 0
+   while _HR_RPT.x100 do
+    local allDone = true
+    for si = 1, 3 do
+     local list = QUIRK_LIST_PER_SLOT[si]
+     local targets = _HR_RPT.slotTarget[si]
+     local drawId = ({920001,920002,920003})[si]
+     -- Cek target dipilih
+     local stopIds = {}
+     for _, q in ipairs(list) do
+      if targets[q.id] then table.insert(stopIds, q.id) end
+     end
+     if #stopIds == 0 then
+      _HR_RPT.SetSlot(si,"[!] SELECT TARGET!",Color3.fromRGB(255,100,60))
+     else
+      attempt = attempt + 1
+      _HR_RPT.SetSlot(si,"[x100] Slot"..si.." #"..attempt.."..",Color3.fromRGB(100,200,255))
+      _ourCall = true
+      local ok, res = pcall(function()
+       return RE.AutoHeroQuirk:InvokeServer({
+        heroGuid = _HR_RPT.guid,
+        drawId = drawId,
+        stopQuirkIds = stopIds,
+       })
+      end)
+      _ourCall = false
+      if not ok then
+       _HR_RPT.SetSlot(si,"[!] Error",Color3.fromRGB(255,100,60))
+      else
+       -- Parse result
+       local gotId, rawId = nil, nil
+       if type(res) == "table" then
+        for _, key in ipairs({"finalResultId","quirkId","resultId","id","result"}) do
+         local v = res[key]
+         if type(v)=="number" and v>0 then rawId=rawId or v; if QUIRK_MAP[v] then gotId=v; break end end
+        end
+        if not gotId then for _,v in pairs(res) do if type(v)=="number" and v>0 then rawId=rawId or v; if QUIRK_MAP[v] then gotId=v; break end end end end
+       end
+       local hit = gotId and targets[gotId] == true
+       if hit then
+        local gn = QUIRK_MAP[gotId] or "ID:"..tostring(gotId)
+        _HR_RPT.SetSlot(si,"DONE: "..gn.." (#"..attempt..")",Color3.fromRGB(80,220,80))
+        -- slot ini selesai, tidak perlu stop semua
+        allDone = false -- tetap loop slot lain
+       else
+        local gn = (gotId and QUIRK_MAP[gotId]) or (rawId and "ID:"..tostring(rawId)) or "?"
+        _HR_RPT.SetSlot(si,"[x100] #"..attempt.." Last: "..gn,Color3.fromRGB(80,180,255))
+        allDone = false
+       end
+      end
+     end
+    end
+    task.wait(0.05)
+   end
+  end)
+ end
+
  x100Pill.MouseButton1Click:Connect(function()
   _HR_RPT.x100 = not _HR_RPT.x100
   SetX100UI(_HR_RPT.x100)
+  if _HR_RPT.x100 then
+   -- Stop Auto Roll Hero kalau lagi jalan (2 mode tidak jalan bersamaan)
+   if _HR_RPT.running then
+    _HR_RPT.running = false
+    SetHeroToggleUI(false)
+    DoAutoRollHero(false)
+   end
+   StartX100Loop()
+  else
+   StopX100()
+  end
  end)
 
  hrHeader.MouseButton1Click:Connect(function()
