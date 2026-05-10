@@ -7302,6 +7302,15 @@ function ParseChatLine(text)
   return
  end
 
+ -- DUNGEON: "Dungeon unlocked, you can Enter it in Konoha Village, hurry up because only 1 minute!"
+ if text:find("Dungeon unlocked", 1, true) then
+  if _WH and _WH.AddLine then
+   _WH.AddLine(text)
+  end
+  TriggerEntryWakeup()
+  return
+ end
+
 --  Deduplicate seen messages (v273 FIX: Short-term memory 3 minutes)
 local _chatSeen = {}
 local function _processMsg(raw)
@@ -7310,6 +7319,7 @@ local function _processMsg(raw)
     
     local function hasKW(s)
         return s:find("MaFissure",1,true) or s:find("appeared in",1,true) or s:find("has begun",1,true)
+            or s:find("Dungeon unlocked",1,true)
     end
     
     if not hasKW(txt) then
@@ -7495,7 +7505,7 @@ local function _whIsAnnounce(text)
  local tl = text:lower()
  return tl:find("mafissure appeared in", 1, true) ~= nil
   or tl:find("has begun", 1, true) ~= nil
-  or tl:find("dungeon", 1, true) ~= nil
+  or tl:find("dungeon unlocked", 1, true) ~= nil
 end
 
 -- Strip rich text tag (<font ...>, </font>, dll) dari teks
