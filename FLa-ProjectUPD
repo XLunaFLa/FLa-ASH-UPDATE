@@ -7343,8 +7343,7 @@ _WH.SendRaid = function(url)
  end)
  elseif isTelegram then
  -- [v274 FIX] Telegram: AT digabung ke Raid List, format sama seperti Discord
- local lines = {"Raid Server
-[Raid List]"}
+  local lines = {"Raid Server\n[Raid List]"}
  for _, entry in ipairs(raidList) do
   local isAT = entry.isAscension == true or (entry.raidId and (entry.raidId < 0 or entry.raidId >= 935001))
   local mn, name
@@ -7370,7 +7369,6 @@ _WH.SendRaid = function(url)
  _doSend(url, table.concat(lines, "\n"))
  end
 end
-SendWebhookRaid = function(url) _WH.SendRaid(url) end -- alias internal
 SendWebhookRaid = function(url) _WH.SendRaid(url) end -- alias internal
 
 -- Kirim notif Siege ke webhook
