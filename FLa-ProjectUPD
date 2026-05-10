@@ -7332,8 +7332,7 @@ _WH.SendRaid = function(url)
  if entry.raidId and entry.raidId > 0 and RAID_CONFIG_GRADE then g = RAID_CONFIG_GRADE[entry.raidId] or "?" end
  if g == "?" then g = (GetBestGrade and GetBestGrade(towerNum, true)) or "?" end
  if g == "?" then g = entry.grade or "?" end
- local _bn = entry.bossName and (entry.bossName:gsub("^%l",string.upper)) or nil
- local atLabel = "Ascension Tower "..towerNum.." - [Monarch] "..(_bn or "?").." ["..g.."]"
+ local atLabel = "Ascension Tower "..towerNum.." ["..g.."]"
  table.insert(lines_at, atLabel)
  if (GRADE_RANK_W[g] or 0) > (GRADE_RANK_W[topGrade] or 0) then topGrade = g end
  end
@@ -7368,8 +7367,7 @@ _WH.SendRaid = function(url)
  if entry.raidId and entry.raidId > 0 and RAID_CONFIG_GRADE then g = RAID_CONFIG_GRADE[entry.raidId] or "?" end
  if g == "?" then g = (GetBestGrade and GetBestGrade(towerNum, true)) or "?" end
  if g == "?" then g = entry.grade or "?" end
- local _bn = entry.bossName and (entry.bossName:gsub("^%l",string.upper)) or nil
- table.insert(lines, "Ascension Tower "..towerNum.." - [Monarch] "..(_bn or "?").." ["..g.."]")
+ table.insert(lines, "Ascension Tower "..towerNum.." ["..g.."]")
  end
  _doSend(url, table.concat(lines, "\n"))
  end
