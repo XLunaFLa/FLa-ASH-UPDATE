@@ -7175,6 +7175,45 @@ TriggerEntryWakeup = function()
         pcall(function() task.cancel(_entryWakeupTimer) end)
         _entryWakeupTimer = nil
     end
+    _entryWakeupTimer = task.delay(_ENTRY_DEBOUNCE_SEC, function()
+        _entryWakeupTimer = nil
+        -- [v61 CYCLEFIX] Reset flag siklus lama
+        _ascMatchedThisCycle = false
+        _raidFallbackActive  = false
+
+        -- ============================================================
+        -- [v62 RINO/RINI FIX] "Si Pemanggil" memutuskan siapa yang dipanggil
+        -- SEBELUM wakeup dikirim ke siapapun:
+        --   Cek RAID_LIVE apakah ada Ascension Tower entry.
+        --   Jika ada + ASC toggle ON  -> _eventOwner = "asc"  -> hanya ASC yang dibangunkan
+        --   Jika tidak / ASC OFF      -> _eventOwner = "raid" -> hanya RAID yang dibangunkan
+        -- Dengan ini tidak ada race: yang tidak dipanggil tidak pernah bangun sama sekali.
+        -- ============================================================
+        local _hasAscEntry = false
+        if ASC and ASC.running then
+            for rid, ent in pairs(RAID_LIVE) do
+                local ridAbs = rid < 0 and math.abs(rid) or rid
+                local isAscById  = ridAbs >= 935001
+                local isAscByMap = ent.mapId and ent.mapId >= 50301 and ent.mapId <= 50326
+                local isAscByFlag = ent.isAscension == true
+                if isAscByFlag or isAscById or isAscByMap then
+                    _hasAscEntry = true; break
+                end
+            end
+        end
+
+        if _hasAscEntry then
+            _eventOwner = "asc"
+            _raidFallbackActive = false
+            if _ascWakeup then pcall(function() _ascWakeup:Fire() end) end
+        else
+            _eventOwner = "raid"
+            _raidFallbackActive = true
+            if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
+        end
+    end)
+end
+
 RebuildRaidList = function()
  local sorted = {}
  for _, e in pairs(RAID_LIVE) do
