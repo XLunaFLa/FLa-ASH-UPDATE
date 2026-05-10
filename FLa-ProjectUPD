@@ -7157,6 +7157,7 @@ end)
 SendWebhookNotif=nil; RebuildRaidList=nil; ParseRaidEntry=nil
 DisconnectRaidConns=nil; ConnectRaidListeners=nil; RaidFireDamage=nil
 
+local _whFlushBuffer = nil -- forward declare agar FlushWebhookPending bisa akses
 do -- [FIX] webhook + raid logic wrapped to free top-level locals
 
 -- ============================================================
@@ -7277,7 +7278,7 @@ local function _extractGradeLast(t)
 end
 
 -- Kirim buffer ke Discord/Telegram, lalu kosongkan buffer
-local function _whFlushBuffer(url)
+_whFlushBuffer = function(url)
  if #_whBuffer == 0 then return end
  local lines   = _whBuffer
  _whBuffer     = {}
@@ -7397,7 +7398,6 @@ _WH.SendSiege = function(url)
 "))
 end
 SendWebhookSiege = function(url) _WH.SendSiege(url) end -- alias internal
-
 
 -- Debounce timer: tunggu 3 detik setelah notif terakhir baru kirim
 local _whDebounce = nil
