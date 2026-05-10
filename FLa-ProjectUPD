@@ -1272,8 +1272,6 @@ _walkSpeedState     = 16   -- Player: WalkSpeed value
 _setMergeToggle     = nil  -- AutoRoll: Merge Potion
 _setUseToggle       = nil  -- AutoRoll: Use Potion
 _setPotatoToggle    = nil  -- Settings: Potato Mode
-_webhookModeSetIdx  = nil  -- Settings: webhook mode setter
-_webhookUrlBox      = nil  -- Settings: urlBox reference untuk restore text
 -- Visual-only setters (update pill tanpa trigger logic - untuk restore UI saat load config)
 _visAutoHide    = nil  -- Main: Auto Hide Reward visual
 _visAutoCollect = nil  -- Main: Auto Collect GOLD & ITEM visual
@@ -1292,8 +1290,6 @@ _visPotato      = nil  -- Settings: Potato Mode visual
 _visWeaponSell  = nil  -- Main: Auto Sell Weapon visual (manual pill)
 _visDecompGem   = nil  -- Main: Auto Decomp Gem visual (manual pill)
 _setTransSlider = nil  -- Theme: UI Transparency slider setter
-_visWebhookToggle = nil  -- Settings: Webhook toggle visual
-_setWebhookToggle = nil  -- Settings: Webhook toggle logic
 _setSpeedSlider = nil  -- Player: WalkSpeed slider setter
 _setGemLevelSlider = nil -- Main: Gem Level slider setter
 
@@ -1472,9 +1468,6 @@ _ascInterrupt  = false -- true sesaat sebelum ASC masuk tower -> MA pause (mirip
 local _lastBossGuid = nil -- guid boss terakhir untuk ExtraReward auto-claim
 _siegeInterrupt = false -- true saat siege pakai remote -> raid pause
 local _gainRaidsLock = false -- flag cegah infinite loop di hook GainRaidsRewards
-_webhookEnabled = false
-_webhookUrl = ""
-_whSilent = false -- true saat scan history awal (jangan fire webhook duplikat)
 
 
 RAID.autoKillBoss = false -- toggle: teleport ke raja + auto attack sampai mati
@@ -6989,33 +6982,9 @@ function ParseChatLine(text)
   if RebuildRaidList then pcall(RebuildRaidList) end
 
   -- [FIX FINAL] AT dan normal raid adalah 1 darah.
-  -- Chat parser dapat grade AT -> langsung update atau BUAT entry WH_LIVE.
+  -- [v10] WH_LIVE removed
   -- Tidak bergantung pada UpdateRaidInfo datang lebih dulu atau tidak.
-  if WH_LIVE then
-   local _atMapId = 50300 + mapNum
-   local _found = false
-   -- Scan WH_LIVE: update entry yang sudah ada
-   for _wrid, _went in pairs(WH_LIVE) do
-    if _went.isAscension and _went.mapId == _atMapId then
-     _went.grade = grade
-     if _ascBossName then _went.bossName = _ascBossName end
-     _found = true
-    end
-   end
-   -- Jika entry belum ada (chat datang sebelum UpdateRaidInfo), buat sekarang
-   -- Saat UpdateRaidInfo tiba nanti, _whParseEntry akan upsert dengan raidId asli
-   if not _found then
-    local _tempKey = -(50300 + mapNum) -- key sementara, negatif agar tidak bentrok
-    WH_LIVE[_tempKey] = {
-     raidId      = _tempKey,
-     mapId       = _atMapId,
-     mn          = mapNum,
-     isAscension = true,
-     grade       = grade,
-     bossName    = _ascBossName,
-    }
-   end
-  end
+  -- [v10] WH_LIVE block removed
  end
  -- Jangan buat entry RAID_LIVE di sini - tunggu server
  else
@@ -7027,7 +6996,7 @@ function ParseChatLine(text)
  end
  end
 
- if not _whSilent then TriggerWebhookDebounce() end
+ -- [v10] webhook removed
  -- [v58] Gunakan debounce terpusat: tunggu 3 detik setelah notif terakhir
  -- baru bangunkan RAID dan ASC bersamaan untuk filter dan masuk
  TriggerEntryWakeup()
@@ -7137,7 +7106,7 @@ task.spawn(function()
 
  -- Scan history awal saat startup (silent, jangan trigger webhook)
  task.wait(5)
- _whSilent = true
+ -- [v10] _whSilent removed
  pcall(function()
  for _, ch in ipairs(channels:GetChildren()) do
  if ch:IsA("TextChannel") then
@@ -7151,7 +7120,7 @@ task.spawn(function()
  end
  end
  end)
- _whSilent = false
+ -- [v10] _whSilent removed
  end)
 end)
 
@@ -7192,7 +7161,7 @@ end)
 
 
 -- Forward declare raid+webhook functions
-SendWebhookNotif=nil; RebuildRaidList=nil; ParseRaidEntry=nil
+RebuildRaidList=nil; ParseRaidEntry=nil
 DisconnectRaidConns=nil; ConnectRaidListeners=nil; RaidFireDamage=nil
 
 do -- [FIX] webhook + raid logic wrapped to free top-level locals
@@ -7201,558 +7170,8 @@ do -- [FIX] webhook + raid logic wrapped to free top-level locals
 -- WEBHOOK SYSTEM - Bersih, akurat, executor-agnostic
 -- Kirim notif ke Discord/Telegram saat Raid atau Siege OPEN
 -- ============================================================
-_WH = {}
-
--- ============================================================
--- WH_LIVE: Storage webhook INDEPENDEN dari RAID_LIVE
--- Diisi langsung dari UpdateRaidInfo listener sendiri.
--- Tidak terpengaruh oleh filter AUTO RAID / AUTO ASC.
--- Key = raidId (number), Value = entry table
--- ============================================================
-WH_LIVE = {}
-
--- Normalize mapId AT ke range 50301-50326
-local function _whNormATMapId(m)
- m = m or 50301
- if m >= 50001 and m <= 50026 then m = m + 300 end
- if m >= 50101 and m <= 50126 then m = m + 200 end
- if m >= 50201 and m <= 50226 then m = m + 100 end
- if m >= 50401 and m <= 50426 then m = m - 100 end
- return m
-end
-
--- Ambil grade untuk entry WH_LIVE
--- Urutan: RAID_CONFIG_GRADE (formula, untuk normal) -> _runeGradeCache[-mn] (AT chat)
--- -> _ASC_CHAT_CACHE[mn] -> entry.grade -> "?"
-local function _whGetGrade(raidId, mapId, isAT, mn)
- -- Normal raid: pakai formula RAID_CONFIG_GRADE
- if not isAT and raidId and raidId > 0 and raidId < 935001 and RAID_CONFIG_GRADE then
-  local g = RAID_CONFIG_GRADE[raidId]
-  if g and g ~= "?" then return g end
- end
- -- AT: ambil dari cache chat parser (key negatif)
- if isAT and mn and _runeGradeCache then
-  local g = _runeGradeCache[-mn]
-  if g and g ~= "?" then return g end
- end
- -- AT: fallback _ASC_CHAT_CACHE
- if isAT and mn and _ASC_CHAT_CACHE and _ASC_CHAT_CACHE[mn] then
-  local g = _ASC_CHAT_CACHE[mn].grade
-  if g and g ~= "?" then return g end
- end
- -- Fallback: coba GetBestGrade
- if GetBestGrade then
-  local g = GetBestGrade(mn, isAT)
-  if g and g ~= "?" then return g end
- end
- return "?"
-end
-
--- Update grade entry WH_LIVE yang masih "?" — dipanggil setelah chat parser update cache
-function WH_UpdateGrades()
- local changed = false
- for rid, ent in pairs(WH_LIVE) do
-  if (not ent.grade or ent.grade == "?") then
-   local g = _whGetGrade(rid, ent.mapId, ent.isAscension, ent.mn)
-   if g and g ~= "?" then
-    ent.grade = g
-    changed = true
-   end
-  end
- end
- -- Kalau ada yang berubah dan webhook aktif, trigger debounce ulang
- if changed and _webhookEnabled and _webhookUrl and _webhookUrl ~= "" then
-  if TriggerWebhookDebounce then TriggerWebhookDebounce() end
- end
-end
-
--- Helper: parse satu entry data server -> masukkan ke WH_LIVE
-local function _whParseEntry(k, info)
- if type(info) ~= "table" then return end
- local raidId = info.raidId or (type(k)=="number" and k) or tonumber(k)
- local mapId = info.mapId
- if not raidId or not mapId then return end
-
- -- Normalize mapId normal: 50101-50120 -> 50001-50020
- if mapId >= 50101 and mapId <= 50120 then mapId = mapId - 100 end
-
- -- Deteksi AT
- local isAT = (mapId >= 50301 and mapId <= 50326) or (raidId >= 935001)
- if isAT then mapId = _whNormATMapId(mapId) end
-
- -- Filter: hanya normal 50001-50020 dan AT 50301-50326
- if not isAT and (mapId < 50001 or mapId > 50020) then return end
-
- local mn = isAT and math.max(1, mapId - 50300) or (mapId - 50000)
-
- -- Boss name dari cache ASC
- local bossName = nil
- if isAT then
-  if _ASC_CHAT_CACHE and _ASC_CHAT_CACHE[mn] then
-   bossName = _ASC_CHAT_CACHE[mn].bossName
-  end
-  if not bossName and RAID_LIVE and RAID_LIVE[raidId] then
-   bossName = RAID_LIVE[raidId].bossName
-  end
- end
-
- local grade = _whGetGrade(raidId, mapId, isAT, mn)
-
- -- [FIX] Cek apakah ada entry temp dari chat parser (key negatif)
- -- Jika ada, ambil grade dan bossName dari sana lalu hapus entry temp
- local _tempKey = -(mapId)
- if isAT and WH_LIVE[_tempKey] then
-  local _tmp = WH_LIVE[_tempKey]
-  -- Preserve grade dari chat jika grade server masih "?" atau nil
-  if (not grade or grade == "?") and _tmp.grade and _tmp.grade ~= "?" then
-   grade = _tmp.grade
-  end
-  if not bossName and _tmp.bossName then
-   bossName = _tmp.bossName
-  end
-  WH_LIVE[_tempKey] = nil -- hapus entry temp
- end
-
- -- Simpan ke WH_LIVE dengan raidId asli dari server
- WH_LIVE[raidId] = {
-  raidId  = raidId,
-  mapId   = mapId,
-  mn      = mn,
-  isAscension = isAT,
-  grade   = grade,
-  bossName = bossName,
- }
-end
-
--- Listener WH_LIVE: pasang SETELAH Remotes siap (dipanggil dari ConnectRaidListeners)
-local _whLiveConn = nil
-function ConnectWHLiveListener()
- if _whLiveConn then pcall(function() _whLiveConn:Disconnect() end); _whLiveConn = nil end
- local _reUp = Remotes:FindFirstChild("UpdateRaidInfo")
- if not _reUp then return end
- _whLiveConn = _reUp.OnClientEvent:Connect(function(data)
-  if type(data) ~= "table" then return end
-  local action = data.action
-  local raidInfos = data.raidInfos
-  if type(raidInfos) ~= "table" then return end
-
-  if action == "RemoveRaidEnters" then
-   -- Hapus entry yang close dari WH_LIVE
-   for k, info in pairs(raidInfos) do
-    local raidId = type(k)=="number" and k or tonumber(k)
-    if raidId then
-     -- Bersihkan grade cache AT saat tutup
-     local ent = WH_LIVE[raidId]
-     if ent and ent.isAscension and ent.mn then
-      if _runeGradeCache then _runeGradeCache[-(ent.mn)] = nil end
-      if _ASC_CHAT_CACHE then _ASC_CHAT_CACHE[ent.mn] = nil end
-     end
-     WH_LIVE[raidId] = nil
-     -- Reset SentRaidIds agar raid bisa re-open dan dikirim lagi
-     if _G.SentRaidIds then _G.SentRaidIds[raidId] = nil end
-    end
-   end
-  else
-   -- AddRaidEnters / update: parse semua entry masuk ke WH_LIVE
-   for k, info in pairs(raidInfos) do
-    _whParseEntry(k, info)
-   end
-   -- Trigger webhook hanya jika ada data baru
-   if not _whSilent and _webhookEnabled and _webhookUrl and _webhookUrl ~= "" then
-    if TriggerWebhookDebounce then TriggerWebhookDebounce() end
-   end
-  end
- end)
-end
-
--- Helper: dapatkan request function (support semua executor)
-local function _getReqFunc()
- -- Support semua executor: Delta, Fluxus, Xeno, Solara, Synapse, KRNL, dll
- local _r = request or http_request or httprequest
-  or (syn and syn.request)
-  or (http and http.request)
-  or (fluxus and fluxus.request)
-  or (krnl and krnl.request)
-  or (electron and electron.request)
-  or (Drawing and Drawing.request) -- beberapa build custom
- -- getgenv fallback: executor expose request di env berbeda
- if not _r then
-  pcall(function()
-   local _env = getgenv and getgenv() or nil
-   if _env then
-    _r = _env.request or _env.http_request or _env.httprequest
-   end
-  end)
- end
- return _r or nil
-end
-
--- Helper: kirim HTTP POST ke Discord atau Telegram
--- return: true (sukses), false (gagal), string (error message)
-local function _doSend(url, text)
- local reqFunc = _getReqFunc()
- if not reqFunc then
-  pcall(function() warn("[ASH Webhook] ERROR: Executor tidak support HTTP request!") end)
-  return false, "Executor tidak support HTTP"
- end
- local HS = game:GetService("HttpService")
- local isDiscord = url:find("discord%.com/api/webhooks")
- local isTelegram = url:find("api%.telegram%.org")
- local ok, res, errMsg = false, nil, nil
- local callOk, callErr = pcall(function()
-  if isDiscord then
-   res = reqFunc({
-    Url = url,
-    Method = "POST",
-    Headers = { ["Content-Type"] = "application/json" },
-    Body = HS:JSONEncode({ content = text }),
-   })
-  elseif isTelegram then
-   local enc = tostring(text):gsub("([^%w%-_%.%~])", function(c)
-    return string.format("%%%02X", string.byte(c))
-   end)
-   res = reqFunc({ Url = url .. "&text=" .. enc, Method = "GET" })
-  end
- end)
- if not callOk then
-  errMsg = "HTTP error: "..(tostring(callErr):sub(1,60))
-  pcall(function() warn("[ASH Webhook] "..errMsg) end)
-  return false, errMsg
- end
- if res and type(res) == "table" then
-  local sc = res.StatusCode or res.status or 0
-  ok = (sc >= 200 and sc < 300)
-  if not ok then
-   errMsg = "HTTP "..sc..(res.Body and (" - "..tostring(res.Body):sub(1,40)) or "")
-   pcall(function() warn("[ASH Webhook] Gagal: "..errMsg) end)
-  end
- elseif res ~= nil then
-  ok = true
- else
-  errMsg = "Tidak ada response dari server"
-  ok = false
- end
- return ok, errMsg
-end
-
--- Kirim notif Raid ke webhook
-_WH.SendRaid = function(url)
- -- ============================================================
- -- [v275] Baca dari WH_LIVE (independen), bukan RAID_LIVE
- -- WH_LIVE berisi semua raid: normal + AT, tanpa filter AUTO RAID/ASC
- -- Grade AT langsung dari _runeGradeCache[-mn] / _ASC_CHAT_CACHE
- -- ============================================================
- local GRADE_COLOR = {
-  ["E"]=9868950,["D"]=6604900,["C"]=5294200,["B"]=6589695,
-  ["A"]=11822335,["S"]=16757810,["SS"]=16768000,["G"]=16742440,
-  ["N"]=16732240,["M"]=16727160,["M+"]=14428340,["M++"]=13115135,
-  ["XM"]=16732360,["ULT"]=16766720,["GOD"]=16777215,
- }
- local GRADE_RANK_W = {
-  ["E"]=1,["D"]=2,["C"]=3,["B"]=4,["A"]=5,["S"]=6,["SS"]=7,
-  ["G"]=8,["N"]=9,["M"]=10,["M+"]=11,["M++"]=12,["XM"]=15,["ULT"]=17,["GOD"]=18,
- }
-
- -- Ambil dari WH_LIVE, fallback ke RAID_LIVE kalau WH_LIVE kosong
- local src = (next(WH_LIVE or {}) ~= nil) and WH_LIVE or RAID_LIVE
- local raidList = {}
- for _, entry in pairs(src or {}) do
-  table.insert(raidList, entry)
- end
- -- Sort: normal (mapId 500xx) dulu, AT (mapId 503xx) belakangan, masing-masing by mn
- table.sort(raidList, function(a, b)
-  local aAT = a.isAscension and true or false
-  local bAT = b.isAscension and true or false
-  if aAT ~= bAT then return not aAT end
-  return (a.mn or a.mapId or 0) < (b.mn or b.mapId or 0)
- end)
- if #raidList == 0 then return end
-
- -- Grade resolver: untuk entry WH_LIVE pakai _whGetGrade, untuk fallback RAID_LIVE pakai entry.grade
- local function resolveGrade(entry)
-  local g = entry.grade or "?"
-  if g ~= "?" then return g end
-  -- Coba ambil fresh dari cache
-  return _whGetGrade(entry.raidId, entry.mapId, entry.isAscension, entry.mn) or "?"
- end
-
- local isDiscord = url:find("discord%.com/api/webhooks")
- local isTelegram = url:find("api%.telegram%.org")
- local HS = game:GetService("HttpService")
- local reqFunc = _getReqFunc()
- if not reqFunc then return end
-
- -- Bangun baris list — sama untuk Discord dan Telegram
- local topGrade = "E"
- local lines_all = {}
- for _, entry in ipairs(raidList) do
-  local isAT = entry.isAscension == true or (entry.raidId and (entry.raidId >= 935001 or entry.raidId < 0))
-  local mn = entry.mn
-  if not mn then
-   mn = isAT and math.max(1, (entry.mapId or 50301) - 50300) or ((entry.mapId or 50000) - 50000)
-  end
-  local name = isAT and ("Ascension Tower "..mn) or (MAP_NAMES[mn] or ("Map "..mn))
-  local g = resolveGrade(entry)
-  table.insert(lines_all, "[Map: "..mn..", "..name.."] | Rank: "..g)
-  if (GRADE_RANK_W[g] or 0) > (GRADE_RANK_W[topGrade] or 0) then topGrade = g end
- end
-
- -- ServerId
- local _vipId = tostring(game.VIPServerId or "")
- local _jobId = tostring(game.JobId or "")
- local _serverId = (_vipId ~= "" and _vipId) or _jobId
-
- if isDiscord then
-  local color = GRADE_COLOR[topGrade] or GRADE_COLOR["E"]
-  local fields = {}
-  if #lines_all > 0 then
-   table.insert(fields, {
-    name = "[Raid List] ("..#lines_all..")",
-    value = table.concat(lines_all, "\n-----------------------\n"),
-    inline = false,
-   })
-  end
-  if _serverId ~= "" then
-   table.insert(fields, {name="ServerId", value=_serverId, inline=false})
-  end
-  local payload = {embeds={{
-   title = "[RAID OPEN] Rank "..topGrade,
-   description = "Total: **"..#raidList.."** raid aktif",
-   color = color,
-   fields = fields,
-   footer = {text = "ASH GUI FLa Project"},
-  }}}
-  pcall(function()
-   reqFunc({Url=url, Method="POST", Headers={["Content-Type"]="application/json"}, Body=HS:JSONEncode(payload)})
-  end)
- elseif isTelegram then
-  local lines = {"Raid Server\n[Raid List]"}
-  for _, l in ipairs(lines_all) do
-   table.insert(lines, l)
-   table.insert(lines, "-----------------------")
-  end
-  if _serverId ~= "" then
-   table.insert(lines, "ServerId")
-   table.insert(lines, _serverId)
-  end
-  _doSend(url, table.concat(lines, "\n"))
- end
-end
-SendWebhookRaid = function(url) _WH.SendRaid(url) end -- alias internal
-
--- Kirim notif Siege ke webhook
-_WH.SendSiege = function(url)
- local SIEGE_NAMES = {
- [3]="Shadow Castle", [7]="Demon Castle Tier 2",
- [10]="Plagueheart", [13]="Lava Hell", [18]="Golden Throne"
- }
- local lines = { "**SIEGE OPEN**" }
- local found = false
- if SIEGE and SIEGE.live then
- for cid, mn in pairs(SIEGE.live) do
- local name = SIEGE_NAMES[mn] or ("Map " .. mn)
- table.insert(lines, string.format("- Map %d - %s", mn, name))
- found = true
- end
- end
- if not found then return end
- local msg = table.concat(lines, "\n")
- _doSend(url, msg)
-end
-SendWebhookSiege = function(url) _WH.SendSiege(url) end -- alias internal
-
--- Debounce timer: tunggu 3 detik setelah notif terakhir baru kirim
-local _whDebounce = nil
-local _whLastSent = 0
-
-TriggerWebhookDebounce = function()
-    if not _webhookEnabled or not _webhookUrl or _webhookUrl == "" then return end
-    
-    -- ==========================================
-    -- [SISTEM INGATAN ANTI-SPAM DISCORD]
-    -- ==========================================
-    _G.SentRaidIds = _G.SentRaidIds or {}
-    _G.SentSiegeIds = _G.SentSiegeIds or {}
-    
-    local hasNew = false
-    
-    -- 1. Cek apakah ada ID Raid baru yang belum pernah dikirim
-    if RAID_LIVE then
-        for id, _ in pairs(RAID_LIVE) do
-            if not _G.SentRaidIds[id] then
-                _G.SentRaidIds[id] = true
-                hasNew = true
-            end
-        end
-    end
-    
-    -- 2. Cek apakah ada ID Siege baru yang belum pernah dikirim
-    if SIEGE and SIEGE.live then
-        for id, _ in pairs(SIEGE.live) do
-            if not _G.SentSiegeIds[id] then
-                _G.SentSiegeIds[id] = true
-                hasNew = true
-            end
-        end
-    end
-    
-    -- 3. HUKUM MUTLAK: Jika tidak ada ID baru, BATALKAN PENGIRIMAN! (Diam)
-    if not hasNew then return end
-    -- ==========================================
-
-    if _whDebounce then pcall(function() task.cancel(_whDebounce) end) end
-
-    -- [v271] Debounce 1 detik (turun dari 3s) agar lebih responsif
-    _whDebounce = task.delay(1, function()
-        _whDebounce = nil
-        -- [v271] Cooldown 10 detik (turun dari 30s) agar tidak terlalu lambat
-        if (tick() - _whLastSent) < 10 then return end
-        _whLastSent = tick()
-
-        task.spawn(function()
-            local mode = _webhookMode or "both"
-            local url = _webhookUrl
-            local hasRaid = next(RAID_LIVE or {}) ~= nil
-            local hasSiege = SIEGE and SIEGE.live and next(SIEGE.live) ~= nil
-
-            if (mode == "raid" or mode == "both") and hasRaid then
-                SendWebhookRaid(url)
-            end
-            if (mode == "siege" or mode == "both") and hasSiege then
-                task.wait(0.3)
-                SendWebhookSiege(url)
-            end
-        end)
-    end)
-end
-
-SendWebhookNotif = TriggerWebhookDebounce -- alias untuk kompatibilitas
-
--- ============================================================
--- [v58] ENTRY WAKEUP DEBOUNCE - Gerbang masuk terpusat
--- ============================================================
--- Semua sumber notif (chat parser, workspace watcher, UpdateRaidInfo server)
--- wajib memanggil TriggerEntryWakeup() dan TIDAK boleh langsung fire wakeup.
---
--- Cara kerja:
---   1. Notif masuk -> data langsung masuk RAID_LIVE (seperti biasa)
---   2. TriggerEntryWakeup() dipanggil -> timer di-reset ke 3 detik
---   3. Selama 3 detik: notif-notif berikutnya terus update data, timer terus di-reset
---   4. Setelah 3 detik tidak ada notif baru -> BARU fire wakeup ke RAID dan ASC
---   5. RAID dan ASC masing-masing cek filter mereka sendiri dan masuk jika cocok
---   6. Karena keduanya dibangunkan dari titik yang SAMA setelah data stabil,
---      tidak ada race condition - siapa yang resolve entry lebih dulu itulah yang masuk
---
--- Keuntungan vs v57:
---   - Tidak perlu _ascPending flag
---   - Tidak ada pembedaan "ini notif ASC, jangan bangunkan RAID" yang rapuh
---   - Lebih toleran terhadap notif terlambat / out-of-order dari server
---   - Tetap ada TryClaimMapLock sebagai safety net terakhir
-
-local _entryWakeupTimer = nil  -- handle task.delay aktif
-local _ENTRY_DEBOUNCE_SEC = 3  -- detik tunggu setelah notif terakhir
-
-TriggerEntryWakeup = function()
-    -- Reset timer: kalau sudah ada timer berjalan, batalkan dan mulai lagi
-    if _entryWakeupTimer then
-        pcall(function() task.cancel(_entryWakeupTimer) end)
-        _entryWakeupTimer = nil
-    end
-    _entryWakeupTimer = task.delay(_ENTRY_DEBOUNCE_SEC, function()
-        _entryWakeupTimer = nil
-        -- [v61 CYCLEFIX] Reset flag siklus lama
-        _ascMatchedThisCycle = false
-        _raidFallbackActive  = false
-
-        -- ============================================================
-        -- [v62 RINO/RINI FIX] "Si Pemanggil" memutuskan siapa yang dipanggil
-        -- SEBELUM wakeup dikirim ke siapapun:
-        --   Cek RAID_LIVE apakah ada Ascension Tower entry.
-        --   Jika ada + ASC toggle ON  -> _eventOwner = "asc"  -> hanya ASC yang dibangunkan
-        --   Jika tidak / ASC OFF      -> _eventOwner = "raid" -> hanya RAID yang dibangunkan
-        -- Dengan ini tidak ada race: yang tidak dipanggil tidak pernah bangun sama sekali.
-        -- ============================================================
-        local _hasAscEntry = false
-        if ASC and ASC.running then
-            for rid, ent in pairs(RAID_LIVE) do
-                -- rid adalah raidId integer (key tabel RAID_LIVE)
-                local ridAbs = rid < 0 and math.abs(rid) or rid
-                local isAscById  = ridAbs >= 935001
-                local isAscByMap = ent.mapId and ent.mapId >= 50301 and ent.mapId <= 50326
-                local isAscByFlag = ent.isAscension == true
-                if isAscByFlag or isAscById or isAscByMap then
-                    _hasAscEntry = true; break
-                end
-            end
-        end
-
-        if _hasAscEntry then
-            -- ASC dipanggil. RAID tetap duduk.
-            _eventOwner = "asc"
-            _raidFallbackActive = false
-            if _ascWakeup then pcall(function() _ascWakeup:Fire() end) end
-        else
-            -- RAID dipanggil. ASC tetap duduk.
-            _eventOwner = "raid"
-            _raidFallbackActive = true
-            if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
-        end
-    end)
-end
--- ============================================================
-FlushWebhookPending = function()
- _whLastSent = 0 -- reset cooldown
- TriggerWebhookDebounce()
-end
-
-_WH.SendCustomMessage = function(url, msg, onDone, onFail)
- if not url or url == "" then
- if onFail then onFail("URL kosong") end; return
- end
- if not url:find("discord%.com/api/webhooks") and not url:find("api%.telegram%.org") then
- if onFail then onFail("URL tidak dikenali (bukan Discord/Telegram)") end; return
- end
- if not _getReqFunc() then
- if onFail then onFail("Executor tidak support HTTP") end; return
- end
- task.spawn(function()
-  local ok, errMsg = _doSend(url, msg)
-  task.wait(0.3)
-  if ok then
-   if onDone then onDone() end
-  else
-   local reason = errMsg or "Gagal kirim"
-   if onFail then onFail(reason) end
-  end
- end)
-end
-
-_WH.VerifyWebhookUrl = function(url, onValid, onInvalid)
- if not url or url == "" then
- if onInvalid then onInvalid("URL kosong") end; return
- end
- local isDiscord = url:find("discord%.com/api/webhooks/")
- local isTelegram = url:find("api%.telegram%.org/bot[^/]+/sendMessage")
- if isDiscord then
- local id, token = url:match("webhooks/(%d+)/([%w_%-]+)")
- if id and token and #token > 10 then
- if onValid then onValid() end
- else
- if onInvalid then onInvalid("Format Discord webhook salah") end
- end
- elseif isTelegram then
- if url:find("chat_id=") then
- if onValid then onValid() end
- else
- if onInvalid then onInvalid("Telegram URL butuh chat_id=...") end
- end
- else
- if onInvalid then onInvalid("Bukan URL Discord/Telegram valid") end
- end
-end
-
 -- Koneksi raid listeners
-_WH.raidConns = {}
+-- [v10] _WH removed
 
 RebuildRaidList = function()
  local sorted = {}
@@ -7803,9 +7222,7 @@ RebuildRaidList = function()
  })
  end
  if _raidIdRefreshCb then pcall(_raidIdRefreshCb) end
- if _webhookEnabled and _webhookUrl ~= "" then
- TriggerWebhookDebounce()
- end
+ -- [v10] webhook removed
 end
 
 -- Parse satu entry raidInfos
@@ -7901,7 +7318,7 @@ end
 -- Hanya untuk dapat raidId yang dibutuhkan CreateRaidTeam.
 -- ============================================================
 
-_WH.raidConns = {}
+-- [v10] _WH removed
 
 DisconnectRaidConns = function()
  for _, conn in ipairs(_WH.raidConns) do
@@ -7957,10 +7374,10 @@ local function _onRaidChildAdded(child, slotName)
  -- TriggerEntryWakeup() akan tunggu 3 detik setelah notif terakhir baru fire RAID & ASC
  if TriggerEntryWakeup then TriggerEntryWakeup() end
  -- [v271] Trigger webhook LANGSUNG saat raid muncul di workspace
- if not _whSilent then
+ do -- [v10] _whSilent guard removed
   task.spawn(function()
    task.wait(0.5)
-   TriggerWebhookDebounce()
+   -- [v10] webhook removed
   end)
  end
 end
@@ -8202,7 +7619,7 @@ ConnectRaidListeners = function()
  RebuildRaidList()
  -- [v58] Gunakan debounce terpusat
  if TriggerEntryWakeup then TriggerEntryWakeup() end
- TriggerWebhookDebounce()
+ -- [v10] webhook removed
  end
  end)
  table.insert(_WH.raidConns, conn)
@@ -8247,7 +7664,7 @@ end
 -- Pasang listener saat start
 task.spawn(function()
  ConnectRaidListeners()
- ConnectWHLiveListener() -- [v275] WH_LIVE independen
+ -- [v10] ConnectWHLiveListener removed
 end)
 
 -- Auto-reconnect kalau Remotes refresh (mis. setelah rejoin)
@@ -8260,7 +7677,7 @@ task.spawn(function()
  lastRef = cur
  if cur then
   ConnectRaidListeners()
-  ConnectWHLiveListener() -- [v275] reconnect WH_LIVE juga
+  -- [v10] ConnectWHLiveListener removed
  end
  end
  end
@@ -9698,7 +9115,7 @@ local function ForceRescanRaidEnter()
             RebuildRaidList()
             -- [v58] Gunakan debounce terpusat
             if TriggerEntryWakeup then TriggerEntryWakeup() end
-            if not _whSilent and TriggerWebhookDebounce then TriggerWebhookDebounce() end
+                    -- [v10] webhook removed
         end
     end)
 end
@@ -14981,326 +14398,6 @@ do
   _visPotato = _v
  end
 
- SectionHeader(p,"Raid Notif/Webhook",10)
-
- -- Info card
- -- info card dihapus (V142)
-
- --  [v115] Mode Dropdown: Raid / Siege / Keduanya 
- local modeCard = Frame(p, C.SURFACE, UDim2.new(1,0,0,0))
- modeCard.LayoutOrder=25; modeCard.AutomaticSize=Enum.AutomaticSize.Y
- Corner(modeCard,9); Stroke(modeCard,C.BORD, 1.5,0.88)
- Padding(modeCard,8,8,10,10)
- New("UIListLayout",{Parent=modeCard,SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,6)})
-
- local modeHdr = Label(modeCard," Mode Notifikasi Webhook",11,C.TXT,Enum.Font.GothamBold)
- modeHdr.Size=UDim2.new(1,0,0,16); modeHdr.LayoutOrder=0
-
- local modeSub = Label(modeCard,"Select the type of notification sent to Discord",9.5,C.TXT3,Enum.Font.GothamBold)
- modeSub.Size=UDim2.new(1,0,0,13); modeSub.LayoutOrder=1
-
- -- Dropdown button
- local MODE_OPTS = {
- {key="raid", label="Raid", desc="Notif saat Raid muncul/update", col=Color3.fromRGB(255,180,60)},
- {key="siege", label="Siege", desc="Notif saat Siege buka/tutup", col=Color3.fromRGB(100,180,255)},
- {key="both", label="Raid + Siege", desc="Notif Raid dan Siege", col=C.TXT},
- }
- local curModeIdx = 3 -- default: both
-
- local modeDDBtn = Btn(modeCard, C.DD_BG, UDim2.new(1,0,0,28))
- modeDDBtn.LayoutOrder=2; Corner(modeDDBtn,7); Stroke(modeDDBtn,C.BORD, 1.5,0.88)
- local modeDDLbl = Label(modeDDBtn," "..MODE_OPTS[curModeIdx].label,10.5,MODE_OPTS[curModeIdx].col,Enum.Font.GothamBold)
- modeDDLbl.Size=UDim2.new(1,-22,1,0); modeDDLbl.Position=UDim2.new(0,4,0,0)
- local modeArr = Label(modeDDBtn,"v",10,Color3.fromRGB(180,120,255),Enum.Font.GothamBold,Enum.TextXAlignment.Center)
- modeArr.Size=UDim2.new(0,18,1,0); modeArr.Position=UDim2.new(1,-20,0,0)
-
- local modeDescLbl = Label(modeCard,MODE_OPTS[curModeIdx].desc,9,C.TXT3,Enum.Font.GothamBold)
- modeDescLbl.Size=UDim2.new(1,0,0,13); modeDescLbl.LayoutOrder=3
-
- modeDDBtn.MouseButton1Click:Connect(function()
- CloseActiveDD()
- local absPos = modeDDBtn.AbsolutePosition
- local absSize = modeDDBtn.AbsoluteSize
- local ITEM_H = 36
-
- local popup = Instance.new("Frame")
- popup.Parent=DDLayer; popup.BackgroundColor3=C.DD_BG; popup.BorderSizePixel=0
- popup.Size=UDim2.new(0,absSize.X+10,0,#MODE_OPTS*(ITEM_H+2)+12)
- popup.Position=UDim2.new(0,absPos.X,0,absPos.Y+absSize.Y+3)
- popup.ZIndex=9999
- Corner(popup, 10); Stroke(popup,C.BORD, 1.5,0.2)
-
- local ll=Instance.new("UIListLayout",popup)
- ll.Padding=UDim.new(0,2); ll.SortOrder=Enum.SortOrder.LayoutOrder
- Instance.new("UIPadding",popup).PaddingTop=UDim.new(0,5)
-
- for i, opt in ipairs(MODE_OPTS) do
- local item=Instance.new("TextButton",popup)
- item.Size=UDim2.new(1,-8,0,ITEM_H); item.LayoutOrder=i
- item.BackgroundColor3=i==curModeIdx and C.SURFACE or C.BG3
- item.BackgroundTransparency=i==curModeIdx and 0.18 or 0.42
- item.BorderSizePixel=0; item.Text=""; item.AutoButtonColor=false; item.ZIndex=9999
- Instance.new("UICorner",item).CornerRadius=UDim.new(0,6)
-
- local iL=Instance.new("TextLabel",item)
- iL.Size=UDim2.new(1,-8,0,16); iL.Position=UDim2.new(0,10,0,4)
- iL.BackgroundTransparency=1; iL.Text=opt.label; iL.TextSize=13
- iL.Font=Enum.Font.Gotham; iL.TextColor3=opt.col
- iL.TextXAlignment=Enum.TextXAlignment.Left; iL.ZIndex=9999
-
- local iD=Instance.new("TextLabel",item)
- iD.Size=UDim2.new(1,-8,0,13); iD.Position=UDim2.new(0,10,0,20)
- iD.BackgroundTransparency=1; iD.Text=opt.desc; iD.TextSize=11
- iD.Font=Enum.Font.GothamBold; iD.TextColor3=C.DIM
- iD.TextXAlignment=Enum.TextXAlignment.Left; iD.ZIndex=9999
-
- local ii=i
- item.MouseButton1Click:Connect(function()
- CloseActiveDD()
- curModeIdx = ii
- _webhookMode = opt.key
- modeDDLbl.Text = " "..opt.label
- modeDDLbl.TextColor3 = opt.col
- modeDescLbl.Text = opt.desc
- end)
- end
- -- Expose webhook mode setter ke global
- _webhookModeSetIdx = function(idx)
-  for i, opt in ipairs(MODE_OPTS) do
-   if i == idx then
-    curModeIdx = idx
-    _webhookMode = opt.key
-    modeDDLbl.Text = " "..opt.label
-    modeDDLbl.TextColor3 = opt.col
-    modeDescLbl.Text = opt.desc
-    break
-   end
-  end
- end
- DDLayer.Visible=true
- _activeDDClose=function() popup:Destroy(); DDLayer.Visible=false end
- end)
-
- -- URL input
- local urlCard = Frame(p, C.SURFACE, UDim2.new(1,0,0,58))
- urlCard.LayoutOrder=3; Corner(urlCard,9); Stroke(urlCard,C.BORD, 1.5,0.88); Padding(urlCard,8,8,10,10)
- New("UIListLayout",{Parent=urlCard,SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,5)})
- local urlHdr=Label(urlCard,"URL Webhook",10.5,C.TXT2,Enum.Font.GothamBold)
- urlHdr.Size=UDim2.new(1,0,0,14); urlHdr.LayoutOrder=0
- local urlBox = Instance.new("TextBox")
- urlBox.Parent=urlCard; urlBox.LayoutOrder=1
- urlBox.Size=UDim2.new(1,0,0,24); urlBox.BackgroundColor3=C.BG3
- urlBox.BorderSizePixel=0; urlBox.TextSize=11; urlBox.Font=Enum.Font.GothamBold
- urlBox.TextColor3=C.TXT2; urlBox.PlaceholderColor3=C.DIM
- urlBox.PlaceholderText="PASTE YOUR LINK DISCORD HERE..."
- urlBox.Text=_webhookUrl; urlBox.TextXAlignment=Enum.TextXAlignment.Left
- urlBox.ClearTextOnFocus=false
- _webhookUrlBox = urlBox  -- expose ke global config
- Corner(urlBox,5); Stroke(urlBox,C.BORD, 1.5,0.88)
- local urlPad=Instance.new("UIPadding",urlBox)
- urlPad.PaddingLeft=UDim.new(0,6); urlPad.PaddingRight=UDim.new(0,6)
- urlBox.FocusLost:Connect(function()
- _webhookUrl = urlBox.Text:match("^%s*(.-)%s*$") or ""
- end)
-
- -- Platform detect label
- local platformLbl = Label(p,"",9.5,C.DIM,Enum.Font.GothamBold)
- platformLbl.LayoutOrder=4; platformLbl.Size=UDim2.new(1,0,0,13)
- function UpdatePlatformLbl()
- local url = _webhookUrl
- if url:find("discord%.com/api/webhooks") then
- platformLbl.Text="[OK] Discord webhook DETECTED"; platformLbl.TextColor3=Color3.fromRGB(100,220,100)
- elseif url:find("api%.telegram%.org") then
- platformLbl.Text="[OK] Telegram bot API DETECTED"; platformLbl.TextColor3=Color3.fromRGB(100,180,255)
- elseif url=="" then
- platformLbl.Text="Content URL"; platformLbl.TextColor3=C.DIM
- else
- platformLbl.Text="URL not recognized (Discord/Telegram)"; platformLbl.TextColor3=Color3.fromRGB(255,180,60)
- end
- end
- urlBox.FocusLost:Connect(function() UpdatePlatformLbl() end)
- UpdatePlatformLbl()
-
- -- Toggle aktifkan webhook
- local wRow = Frame(p,C.BG3,UDim2.new(1,0,0,50))
- wRow.LayoutOrder=5; Corner(wRow,9); Stroke(wRow,C.BORD, 1.5,0.88)
- local wL=Label(wRow," ACTIVE Webhook",13,C.TXT,Enum.Font.GothamBold)
- wL.Size=UDim2.new(0.65,0,0,20); wL.Position=UDim2.new(0,10,0,6)
- local wS=Label(wRow,"Send notifications for every update",9.5,C.TXT3,Enum.Font.GothamBold)
- wS.Size=UDim2.new(0.65,0,0,14); wS.Position=UDim2.new(0,10,0,26)
- local wPill=Btn(wRow,C.TBAR,UDim2.new(0,50,0,26))
- wPill.AnchorPoint=Vector2.new(1,0.5); wPill.Position=UDim2.new(1,-10,0.5,0); Corner(wPill,13)
- local wKnob=Frame(wPill,Color3.fromRGB(120,50,8),UDim2.new(0,20,0,20))
- wKnob.AnchorPoint=Vector2.new(0,0.5); wKnob.Position=UDim2.new(0,3,0.5,0); Corner(wKnob,10)
- wPill.MouseButton1Click:Connect(function()
- _webhookEnabled=not _webhookEnabled; local on=_webhookEnabled
- _webhookUrl = urlBox.Text:match("^%s*(.-)%s*$") or ""
- TweenService:Create(wPill,TweenInfo.new(0.16),{BackgroundColor3=on and Color3.fromRGB(200,80,10) or C.TBAR}):Play()
- TweenService:Create(wKnob,TweenInfo.new(0.16),{
- Position=on and UDim2.new(1,-23,0.5,0) or UDim2.new(0,3,0.5,0),
- BackgroundColor3=on and Color3.fromRGB(255,255,255) or Color3.fromRGB(120,50,8),
- }):Play()
- wRow.BackgroundColor3=on and C.BG2 or C.BG3
- UpdatePlatformLbl()
- if on then
- if FlushWebhookPending then task.spawn(FlushWebhookPending) end
- end
- end)
- -- Visual-only setter untuk webhook toggle (update pill tanpa trigger logic)
- _visWebhookToggle = function(v)
-  TweenService:Create(wPill,TweenInfo.new(0.16),{BackgroundColor3=v and Color3.fromRGB(200,80,10) or C.TBAR}):Play()
-  TweenService:Create(wKnob,TweenInfo.new(0.16),{
-   Position=v and UDim2.new(1,-23,0.5,0) or UDim2.new(0,3,0.5,0),
-   BackgroundColor3=v and Color3.fromRGB(255,255,255) or Color3.fromRGB(120,50,8),
-  }):Play()
-  wRow.BackgroundColor3=v and C.BG2 or C.BG3
- end
- -- Logic setter untuk webhook toggle
- _setWebhookToggle = function(v)
-  if v == _webhookEnabled then return end
-  _webhookEnabled = v
-  TweenService:Create(wPill,TweenInfo.new(0.16),{BackgroundColor3=v and Color3.fromRGB(200,80,10) or C.TBAR}):Play()
-  TweenService:Create(wKnob,TweenInfo.new(0.16),{
-   Position=v and UDim2.new(1,-23,0.5,0) or UDim2.new(0,3,0.5,0),
-   BackgroundColor3=v and Color3.fromRGB(255,255,255) or Color3.fromRGB(120,50,8),
-  }):Play()
-  wRow.BackgroundColor3=v and C.BG2 or C.BG3
-  pcall(UpdatePlatformLbl)
-  if v and FlushWebhookPending then task.spawn(FlushWebhookPending) end
- end
-
- --  Row: Test Webhook + Verify Link 
- local btnRow = Frame(p, C.BLACK, UDim2.new(1,0,0,36))
- btnRow.LayoutOrder=6; btnRow.BackgroundTransparency=1
- New("UIListLayout",{Parent=btnRow,FillDirection=Enum.FillDirection.Horizontal,
- SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0, 10)})
-
- -- Test Webhook
- local testRow=Frame(btnRow,C.BG3,UDim2.new(0.5,-4,1,0))
- testRow.LayoutOrder=1; Corner(testRow,9); Stroke(testRow,C.BORD, 1.5,0.88)
- local testBtn=Btn(testRow,Color3.fromRGB(160,65,8),UDim2.new(1,-16,0,24))
- testBtn.AnchorPoint=Vector2.new(0.5,0.5); testBtn.Position=UDim2.new(0.5,0,0.5,0)
- Corner(testBtn,7); Stroke(testBtn,C.BORD, 1.5,0.88)
- local testLbl=Label(testBtn," Test Webhook",10,C.TXT,Enum.Font.GothamBold,Enum.TextXAlignment.Center)
- testLbl.Size=UDim2.new(1,0,1,0)
- testBtn.MouseButton1Click:Connect(function()
- _webhookUrl = urlBox.Text:match("^%s*(.-)%s*$") or ""
- UpdatePlatformLbl()
- local msg = "[OK] **[ASH GUI - FLa Project]** Test Webhook berhasil!\n> Mode: `"..(_webhookMode or "both"):upper().."`\n> Webhook aktif dan siap menerima notifikasi Raid/Siege."
- testLbl.Text="[..] Sending..."; testLbl.TextColor3=Color3.fromRGB(255,220,60)
- -- [FIX] Timeout UI 10s: HTTP Discord butuh 1-3 detik, jangan timeout terlalu cepat
- local _done = false
- task.delay(10, function()
- if not _done then
- _done = true
- testLbl.Text="[!] Timeout/No HTTP"; testLbl.TextColor3=Color3.fromRGB(255,80,60)
- task.delay(3, function() testLbl.Text=" Test Webhook"; testLbl.TextColor3=C.TXT end)
- end
- end)
- _WH.SendCustomMessage(_webhookUrl, msg,
- function()
- if _done then return end; _done = true
- task.spawn(function()
- testLbl.Text="[OK] Sent!"; testLbl.TextColor3=Color3.fromRGB(100,255,100)
- task.wait(2.5)
- testLbl.Text=" Test Webhook"; testLbl.TextColor3=C.TXT
- end)
- end,
- function(err)
- if _done then return end; _done = true
- task.spawn(function()
- testLbl.Text=""..err; testLbl.TextColor3=Color3.fromRGB(255,80,60)
- task.wait(2.5)
- testLbl.Text=" Test Webhook"; testLbl.TextColor3=C.TXT
- end)
- end
- )
- end)
-
- -- Verify Link
- local verRow=Frame(btnRow,C.BG3,UDim2.new(0.5,-4,1,0))
- verRow.LayoutOrder=2; Corner(verRow,9); Stroke(verRow,C.BORD, 1.5,0.88)
- local verBtn=Btn(verRow,C.BG2,UDim2.new(1,-16,0,24))
- verBtn.AnchorPoint=Vector2.new(0.5,0.5); verBtn.Position=UDim2.new(0.5,0,0.5,0)
- Corner(verBtn,7); Stroke(verBtn,C.BORD, 1.5,0.88)
- local verLbl=Label(verBtn,"[] Verify Link",10,C.TXT,Enum.Font.GothamBold,Enum.TextXAlignment.Center)
- verLbl.Size=UDim2.new(1,0,1,0)
- verBtn.MouseButton1Click:Connect(function()
- _webhookUrl = urlBox.Text:match("^%s*(.-)%s*$") or ""
- UpdatePlatformLbl()
- verLbl.Text="[..] Cek..."; verLbl.TextColor3=Color3.fromRGB(255,220,60)
- _WH.VerifyWebhookUrl(_webhookUrl,
- function()
- task.spawn(function()
- verLbl.Text="[OK] Link Valid!"; verLbl.TextColor3=Color3.fromRGB(100,255,100)
- task.wait(1)
- verLbl.Text="[] Verify Link"; verLbl.TextColor3=C.TXT
- end)
- end,
- function(err)
- task.spawn(function()
- verLbl.Text=""..err; verLbl.TextColor3=Color3.fromRGB(255,80,60)
- task.wait(1)
- verLbl.Text="[] Verify Link"; verLbl.TextColor3=C.TXT
- end)
- end
- )
- end)
-
- --  Kirim Sekarang (manual trigger sesuai mode) 
- local sendNowCard = Frame(p, C.BG3, UDim2.new(1,0,0,38))
- sendNowCard.LayoutOrder=7; Corner(sendNowCard,9); Stroke(sendNowCard,C.BORD, 1.5,0.88)
- local sendNowBtn = Btn(sendNowCard,C.BG2,UDim2.new(0.7,0,0,26))
- sendNowBtn.AnchorPoint=Vector2.new(0.5,0.5); sendNowBtn.Position=UDim2.new(0.5,0,0.5,0)
- Corner(sendNowBtn, 10); Stroke(sendNowBtn,C.BORD, 1.5,0.88)
- local sendNowLbl=Label(sendNowBtn," Send Notify Now",10.5,C.TXT,Enum.Font.GothamBold,Enum.TextXAlignment.Center)
- sendNowLbl.Size=UDim2.new(1,0,1,0)
- sendNowBtn.MouseButton1Click:Connect(function()
- _webhookUrl = urlBox.Text:match("^%s*(.-)%s*$") or ""
- if _webhookUrl == "" then
- sendNowLbl.Text="URL kosong!"; sendNowLbl.TextColor3=Color3.fromRGB(255,180,60)
- task.delay(2, function() sendNowLbl.Text=" Send Notify Now"; sendNowLbl.TextColor3=C.TXT end)
- return
- end
- sendNowLbl.Text="[..] Mengirim..."; sendNowLbl.TextColor3=Color3.fromRGB(255,220,60)
- -- [FIX] Timeout UI 12s: reset label kalau pengiriman hang
- local _snDone = false
- task.delay(12, function()
- if not _snDone then
- _snDone = true
- sendNowLbl.Text="[!] Timeout"; sendNowLbl.TextColor3=Color3.fromRGB(255,80,60)
- task.delay(2.5, function() sendNowLbl.Text=" Send Notify Now"; sendNowLbl.TextColor3=C.TXT end)
- end
- end)
- task.spawn(function()
- local mode = _webhookMode or "both"
- local url = _webhookUrl
- local sent = false
- local hasRaid = next(RAID_LIVE or {}) ~= nil
- local hasSiege = SIEGE and SIEGE.live and next(SIEGE.live) ~= nil
- if (mode == "raid" or mode == "both") and hasRaid then
- if _WH.SendRaid then _WH.SendRaid(url) end; sent = true
- end
- if (mode == "siege" or mode == "both") and hasSiege then
- task.wait(0.3)
- if _WH.SendSiege then _WH.SendSiege(url) end; sent = true
- end
- if not sent then
- -- Tidak ada data raid/siege aktif saat tombol ditekan
- if _snDone then return end; _snDone = true
- sendNowLbl.Text="[!] No Raid Data"; sendNowLbl.TextColor3=Color3.fromRGB(255,180,60)
- task.delay(2.5, function() sendNowLbl.Text=" Send Notify Now"; sendNowLbl.TextColor3=C.TXT end)
- return
- end
- _whLastSent = tick()
- if _snDone then return end; _snDone = true
- task.wait(0.5)
- sendNowLbl.Text="[OK] Sent!"; sendNowLbl.TextColor3=Color3.fromRGB(100,255,100)
- task.wait(2.5)
- sendNowLbl.Text=" Send Notify Now"; sendNowLbl.TextColor3=C.TXT
- end)
- end)
-end
 
 
 -- ============================================================
@@ -16262,8 +15359,8 @@ task.spawn(function()
             elseif action == "OpenCityRaid" then
                 SIEGE.live[id] = mn
                 if _siegeWakeup then pcall(function() _siegeWakeup:Fire() end) end
-                if not _whSilent and TriggerWebhookDebounce then 
-                    TriggerWebhookDebounce() 
+                    -- [v10] webhook removed
+                    -- [v10] webhook removed 
                 end
             elseif action == "CloseCityRaid" or action == "LeaveCityRaid" then
                 SIEGE.live[id] = nil
