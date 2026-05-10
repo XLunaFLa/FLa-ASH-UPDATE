@@ -7310,16 +7310,14 @@ _whFlushBuffer = function(url)
   if #lines_normal > 0 then
    table.insert(fields, {
     name   = "[Normal Raid] ("..#lines_normal..")",
-    value  = table.concat(lines_normal, "
-"),
+    value  = table.concat(lines_normal, "\n"),
     inline = false,
    })
   end
   if #lines_at > 0 then
    table.insert(fields, {
     name   = "[Ascension Tower] ("..#lines_at..")",
-    value  = table.concat(lines_at, "
-"),
+    value  = table.concat(lines_at, "\n"),
     inline = false,
    })
   end
@@ -7343,8 +7341,7 @@ _whFlushBuffer = function(url)
   local out = {"[RAID OPEN] Rank "..topGrade}
   for _, l in ipairs(lines_normal) do table.insert(out, l) end
   for _, l in ipairs(lines_at)     do table.insert(out, l) end
-  _doSend(url, table.concat(out, "
-"))
+  _doSend(url, table.concat(out, "\n"))
  end
 end
 
@@ -7394,8 +7391,7 @@ _WH.SendSiege = function(url)
   end
  end
  if not found then return end
- _doSend(url, table.concat(lines, "
-"))
+ _doSend(url, table.concat(lines, "\n"))
 end
 SendWebhookSiege = function(url) _WH.SendSiege(url) end -- alias internal
 
