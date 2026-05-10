@@ -7430,8 +7430,15 @@ _WH.SendRaid = function(url)
  local function resolveGrade(entry)
   local g = entry.grade or "?"
   if g ~= "?" then return g end
+  -- [FIX] Hitung mn on-the-fly jika entry.mn nil (fallback ke RAID_LIVE tidak punya .mn)
+  local isAT = entry.isAscension == true
+  local mn = entry.mn
+  if not mn and entry.mapId then
+   mn = isAT and math.max(1, entry.mapId - 50300) or (entry.mapId - 50000)
+  end
+  if not mn then return "?" end -- masih nil setelah hitung -> bail out aman
   -- Coba ambil fresh dari cache
-  return _whGetGrade(entry.raidId, entry.mapId, entry.isAscension, entry.mn) or "?"
+  return _whGetGrade(entry.raidId, entry.mapId, isAT, mn) or "?"
  end
 
  local isDiscord = url:find("discord%.com/api/webhooks")
@@ -7819,6 +7826,8 @@ end
 -- Fallback: _runeGradeCache (chat/popup), lalu RAID_LIVE entry grade field
 -- mapNum = angka map (1-18), return string grade atau nil
 function GetBestGrade(mapNum, isAscension)
+ -- [FIX] Guard: mapNum nil menyebabkan crash arithmetic 50000 + nil
+ if not mapNum or type(mapNum) ~= "number" then return nil end
  local mapId = 50000 + mapNum
  -- [FIX] Ascension pakai cacheKey negatif
  local cacheKey = isAscension and (-mapNum) or mapNum
