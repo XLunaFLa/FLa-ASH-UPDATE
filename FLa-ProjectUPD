@@ -6987,7 +6987,25 @@ function ParseChatLine(text)
    end
   end
   if RebuildRaidList then pcall(RebuildRaidList) end
-  -- [v275] Update grade WH_LIVE yang masih "?" setelah chat parser dapat grade AT
+
+  -- [FIX] AT dan normal raid adalah 1 darah - diperlakukan sama di WH_LIVE.
+  -- Chat parser dapat grade AT -> langsung cari & update entry WH_LIVE yang cocok.
+  -- Tidak perlu lewat WH_UpdateGrades, langsung scan WH_LIVE by mapId.
+  -- Ini identik dengan cara normal raid: grade langsung masuk saat data tersedia.
+  if WH_LIVE then
+   local _atMapId = 50300 + mapNum -- AT mapId = 50301-50326
+   for _wrid, _went in pairs(WH_LIVE) do
+    if _went.isAscension and _went.mapId == _atMapId then
+     _went.grade = grade
+     if _ascBossName and not _went.bossName then
+      _went.bossName = _ascBossName
+     end
+    end
+   end
+  end
+
+  -- Fallback: jika WH_LIVE belum punya entry AT ini (chat datang lebih dulu dari server),
+  -- WH_UpdateGrades akan mengisinya saat UpdateRaidInfo tiba.
   if WH_UpdateGrades then pcall(WH_UpdateGrades) end
  end
  -- Jangan buat entry RAID_LIVE di sini - tunggu server
@@ -7430,15 +7448,8 @@ _WH.SendRaid = function(url)
  local function resolveGrade(entry)
   local g = entry.grade or "?"
   if g ~= "?" then return g end
-  -- [FIX] Hitung mn on-the-fly jika entry.mn nil (fallback ke RAID_LIVE tidak punya .mn)
-  local isAT = entry.isAscension == true
-  local mn = entry.mn
-  if not mn and entry.mapId then
-   mn = isAT and math.max(1, entry.mapId - 50300) or (entry.mapId - 50000)
-  end
-  if not mn then return "?" end -- masih nil setelah hitung -> bail out aman
   -- Coba ambil fresh dari cache
-  return _whGetGrade(entry.raidId, entry.mapId, isAT, mn) or "?"
+  return _whGetGrade(entry.raidId, entry.mapId, entry.isAscension, entry.mn) or "?"
  end
 
  local isDiscord = url:find("discord%.com/api/webhooks")
@@ -7826,8 +7837,6 @@ end
 -- Fallback: _runeGradeCache (chat/popup), lalu RAID_LIVE entry grade field
 -- mapNum = angka map (1-18), return string grade atau nil
 function GetBestGrade(mapNum, isAscension)
- -- [FIX] Guard: mapNum nil menyebabkan crash arithmetic 50000 + nil
- if not mapNum or type(mapNum) ~= "number" then return nil end
  local mapId = 50000 + mapNum
  -- [FIX] Ascension pakai cacheKey negatif
  local cacheKey = isAscension and (-mapNum) or mapNum
