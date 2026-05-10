@@ -6901,47 +6901,83 @@ function ParseChatLine(text)
  if type(text) ~= "string" or #text < 3 then return end
  text = text:gsub("<[^>]+>",""):gsub("[\r\n]+"," "):match("^%s*(.-)%s*$") or text
 
- -- Helper: ekstrak grade dari teks (dipakai RAID normal dan AT baris 2)
- local function extractGrade(t)
-  local g = t:match("%[M%+%+%]") and "M++" or t:match("%[M%+%]") and "M+" or
-   t:match("%[SS%]") and "SS" or t:match("%[XM%]") and "XM" or
-   t:match("%[ULT%]") and "ULT" or t:match("%[GOD%]") and "GOD" or
-   t:match("%[([EDCBAGSNMedcbagsn])%]") or (t:find("%[M%]") and "M")
-  return g and g:upper() or nil
- end
-
  -- ============================================================
- -- RAID Normal: "The MaFissure appeared in 6,Orc Palace [B]"
+ -- CONFIRMED dari sniffer: TipsPanel kirim 1 baris lengkap untuk keduanya:
+ -- Normal : "The MaFissure appeared in 6,Orc Palace [B]"
+ -- AT     : "The MaFissure appeared in Ascension Tower 4 - [Monarch] Grendal+1 [E]"
+ -- Grade SELALU ada di bracket TERAKHIR dalam teks.
  -- ============================================================
  if text:find("MaFissure",1,true) and text:find("appeared",1,true) then
 
-  -- BARIS 1 AT: "appeared in Ascension Tower 7"
-  -- Simpan nomor tower, nunggu baris 2 ([Monarch] ...)
+  -- Helper: ambil grade dari bracket TERAKHIR dalam teks
+  -- Ini kunci fix: skip [Monarch], [King], dll -- ambil yang paling akhir
+  local function extractGradeLast(t)
+   local grade = nil
+   -- Cek multi-char grade dulu (M++, M+, SS, XM, ULT, GOD)
+   for _, pat in ipairs({"M%+%+","M%+","SS","XM","ULT","GOD","M"}) do
+    if t:find("%["..pat.."]", 1, false) then
+     -- Ambil posisi TERAKHIR
+     local last = nil
+     for m in t:gmatch("%["..pat.."]") do last = m end
+     if last then
+      grade = last:match("%[(.+)%]")
+      break
+     end
+    end
+   end
+   if grade then return grade:upper() end
+   -- Single char: ambil bracket TERAKHIR yang valid, skip [Monarch] dll
+   local last = nil
+   for bracket in t:gmatch("%[([^%]]+)%]") do
+    local up = bracket:upper()
+    if up:match("^[EDCBAGSN]$") then
+     last = up
+    end
+   end
+   return last
+  end
+
+  -- ASCENSION TOWER: "appeared in Ascension Tower 4 - [Monarch] Grendal+1 [E]"
   if text:find("Ascension Tower", 1, true) then
    local towerNum = tonumber(text:match("Ascension Tower (%d+)"))
-   if towerNum then
-    _pendingTowerNum  = towerNum
-    _pendingTowerTime = tick()
+   local grade    = extractGradeLast(text)
+   if towerNum and grade then
+    -- Cache key negatif agar tidak bentrok dengan normal raid (map 1-20)
+    _runeGradeCache[-towerNum] = grade
+    if not _ASC_CHAT_CACHE then _ASC_CHAT_CACHE = {} end
+    _ASC_CHAT_CACHE[towerNum] = { grade = grade, time = os.time() }
+    -- [FIX TIMING] update RAID_LIVE entry AT yang sudah ada tapi grade masih "?"
+    for _rid, _ent in pairs(RAID_LIVE) do
+     if _ent.isAscension and _ent.mapId then
+      local _mn2 = (_ent.mapId >= 50301 and _ent.mapId <= 50326)
+       and (_ent.mapId - 50300) or nil
+      if _mn2 == towerNum and (_ent.grade == "?" or not _ent.grade) then
+       _ent.grade = grade
+       _ent.label = "Ascension Tower ".._mn2.." ["..grade.."]"
+      end
+     end
+    end
+    if RebuildRaidList then pcall(RebuildRaidList) end
+    if not _whSilent then TriggerWebhookDebounce() end
+    TriggerEntryWakeup()
    end
-   -- Selesai untuk baris 1, tidak ada grade di sini
    return
   end
 
-  -- RAID Normal: "appeared in 6,Orc Palace [B]"
+  -- RAID NORMAL: "appeared in 6,Orc Palace [B]"
   local mapStr, rest
   mapStr, rest = text:match("appeared in (%d+),(.+)")
   if not mapStr then mapStr, rest = text:match("appeared in (%d+) (.+)") end
   if mapStr then
    local mapNum = tonumber(mapStr)
-   local grade = extractGrade(rest or "") or extractGrade(text)
-   if not grade and text:find("Monarch",1,true) then grade = "?" end
+   local grade  = extractGradeLast(rest or "") or extractGradeLast(text)
    if mapNum and grade then
-    local prev = _runeGradeCache[mapNum]
+    local prev      = _runeGradeCache[mapNum]
     local cleanPrev = prev and prev:match("^([^%s%(]+)") or prev
-    local shouldUpdate = not prev or cleanPrev == "?" or (GRADE_RANK[grade] and GRADE_RANK[cleanPrev] and GRADE_RANK[grade] > GRADE_RANK[cleanPrev])
-    if shouldUpdate then _runeGradeCache[mapNum] = grade end
-    -- Update isAscension = false untuk entry normal di RAID_LIVE
-    for rid, entry in pairs(RAID_LIVE) do
+    local upd = not prev or cleanPrev == "?"
+     or (GRADE_RANK[grade] and GRADE_RANK[cleanPrev] and GRADE_RANK[grade] > GRADE_RANK[cleanPrev])
+    if upd then _runeGradeCache[mapNum] = grade end
+    for _, entry in pairs(RAID_LIVE) do
      if entry.mapId and (entry.mapId - 50000) == mapNum then
       entry.isAscension = false
      end
@@ -6949,77 +6985,6 @@ function ParseChatLine(text)
     if not _whSilent then TriggerWebhookDebounce() end
     TriggerEntryWakeup()
    end
-  end
-  return
- end
-
- -- ============================================================
- -- BARIS 2 AT: "[Monarch] Frostborne [E]"
- -- Hanya diproses kalau ada _pendingTowerNum aktif (< 10 detik)
- -- Logika IDENTIK script lama yang grade-nya sudah terbukti benar
- -- ============================================================
- if text:find("Monarch",1,true)
-  and _pendingTowerNum
-  and (tick() - _pendingTowerTime) < 10 then
-
-  local towerNum = _pendingTowerNum
-  _pendingTowerNum  = nil
-  _pendingTowerTime = 0
-
-  -- Ekstrak nama boss: "[Monarch] Frostborne+1 [E]" -> "frostborne"
-  local bossName = text:match("%[Monarch%]%s*([%a%s]+)%s*%[") or "?"
-  bossName = bossName:match("^%s*(.-)%s*$") or bossName
-  _ascBossName = (bossName ~= "?") and bossName:lower() or nil
-
-  -- Ekstrak grade dari baris 2
-  local grade = text:match("%[M%+%+%]") and "M++" or text:match("%[M%+%]") and "M+" or
-   text:match("%[SS%]") and "SS" or text:match("%[XM%]") and "XM" or
-   text:match("%[ULT%]") and "ULT" or text:match("%[GOD%]") and "GOD"
-  if not grade then
-   for bracket in text:gmatch("%[([^%]]+)%]") do
-    if bracket ~= "Monarch"
-     and #bracket <= 3
-     and bracket:match("^[EDCBAGSNMedcbagsn%+]+$") then
-     grade = bracket:upper(); break
-    end
-   end
-  end
-
-  if grade then
-   -- Simpan ke cache dengan key negatif (tidak bentrok dengan normal raid)
-   local prev = _runeGradeCache[-towerNum]
-   local cleanPrev = prev and prev:match("^([^%s%(]+)") or prev
-   -- AT: selalu update (setiap event = tower baru, grade bisa berbeda)
-   local shouldUpdate = not prev or cleanPrev == "?" or true
-   if shouldUpdate then _runeGradeCache[-towerNum] = grade end
-
-   -- Simpan ke _ASC_CHAT_CACHE untuk ParseRaidEntry
-   if not _ASC_CHAT_CACHE then _ASC_CHAT_CACHE = {} end
-   _ASC_CHAT_CACHE[towerNum] = {
-    grade    = grade,
-    bossName = _ascBossName,
-    time     = os.time(),
-   }
-
-   -- [FIX TIMING] Jika RAID_LIVE sudah ada entry AT ini dengan grade "?",
-   -- update langsung sekarang (server data datang lebih dulu dari chat)
-   for _rid, _ent in pairs(RAID_LIVE) do
-    if _ent.isAscension and _ent.mapId then
-     local _mn2 = (_ent.mapId >= 50301 and _ent.mapId <= 50326)
-      and (_ent.mapId - 50300) or nil
-     if _mn2 == towerNum and (_ent.grade == "?" or not _ent.grade) then
-      _ent.grade = grade
-      if _ascBossName then _ent.bossName = _ascBossName end
-      _ent.label = "Ascension Tower ".._mn2
-       ..(_ent.bossName and (" - "..(_ent.bossName:gsub("^%l",string.upper))) or "")
-       .." ["..grade.."]"
-     end
-    end
-   end
-   if RebuildRaidList then pcall(RebuildRaidList) end
-
-   if not _whSilent then TriggerWebhookDebounce() end
-   TriggerEntryWakeup()
   end
   return
  end
