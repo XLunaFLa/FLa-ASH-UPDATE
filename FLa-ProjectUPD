@@ -6988,25 +6988,34 @@ function ParseChatLine(text)
   end
   if RebuildRaidList then pcall(RebuildRaidList) end
 
-  -- [FIX] AT dan normal raid adalah 1 darah - diperlakukan sama di WH_LIVE.
-  -- Chat parser dapat grade AT -> langsung cari & update entry WH_LIVE yang cocok.
-  -- Tidak perlu lewat WH_UpdateGrades, langsung scan WH_LIVE by mapId.
-  -- Ini identik dengan cara normal raid: grade langsung masuk saat data tersedia.
+  -- [FIX FINAL] AT dan normal raid adalah 1 darah.
+  -- Chat parser dapat grade AT -> langsung update atau BUAT entry WH_LIVE.
+  -- Tidak bergantung pada UpdateRaidInfo datang lebih dulu atau tidak.
   if WH_LIVE then
-   local _atMapId = 50300 + mapNum -- AT mapId = 50301-50326
+   local _atMapId = 50300 + mapNum
+   local _found = false
+   -- Scan WH_LIVE: update entry yang sudah ada
    for _wrid, _went in pairs(WH_LIVE) do
     if _went.isAscension and _went.mapId == _atMapId then
      _went.grade = grade
-     if _ascBossName and not _went.bossName then
-      _went.bossName = _ascBossName
-     end
+     if _ascBossName then _went.bossName = _ascBossName end
+     _found = true
     end
    end
+   -- Jika entry belum ada (chat datang sebelum UpdateRaidInfo), buat sekarang
+   -- Saat UpdateRaidInfo tiba nanti, _whParseEntry akan upsert dengan raidId asli
+   if not _found then
+    local _tempKey = -(50300 + mapNum) -- key sementara, negatif agar tidak bentrok
+    WH_LIVE[_tempKey] = {
+     raidId      = _tempKey,
+     mapId       = _atMapId,
+     mn          = mapNum,
+     isAscension = true,
+     grade       = grade,
+     bossName    = _ascBossName,
+    }
+   end
   end
-
-  -- Fallback: jika WH_LIVE belum punya entry AT ini (chat datang lebih dulu dari server),
-  -- WH_UpdateGrades akan mengisinya saat UpdateRaidInfo tiba.
-  if WH_UpdateGrades then pcall(WH_UpdateGrades) end
  end
  -- Jangan buat entry RAID_LIVE di sini - tunggu server
  else
@@ -7289,7 +7298,22 @@ local function _whParseEntry(k, info)
 
  local grade = _whGetGrade(raidId, mapId, isAT, mn)
 
- -- Simpan ke WH_LIVE (upsert)
+ -- [FIX] Cek apakah ada entry temp dari chat parser (key negatif)
+ -- Jika ada, ambil grade dan bossName dari sana lalu hapus entry temp
+ local _tempKey = -(mapId)
+ if isAT and WH_LIVE[_tempKey] then
+  local _tmp = WH_LIVE[_tempKey]
+  -- Preserve grade dari chat jika grade server masih "?" atau nil
+  if (not grade or grade == "?") and _tmp.grade and _tmp.grade ~= "?" then
+   grade = _tmp.grade
+  end
+  if not bossName and _tmp.bossName then
+   bossName = _tmp.bossName
+  end
+  WH_LIVE[_tempKey] = nil -- hapus entry temp
+ end
+
+ -- Simpan ke WH_LIVE dengan raidId asli dari server
  WH_LIVE[raidId] = {
   raidId  = raidId,
   mapId   = mapId,
