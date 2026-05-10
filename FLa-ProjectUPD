@@ -7166,11 +7166,7 @@ DisconnectRaidConns=nil; ConnectRaidListeners=nil; RaidFireDamage=nil
 
 do -- [FIX] webhook + raid logic wrapped to free top-level locals
 
--- ============================================================
--- WEBHOOK SYSTEM - Bersih, akurat, executor-agnostic
--- Kirim notif ke Discord/Telegram saat Raid atau Siege OPEN
--- ============================================================
--- Koneksi raid listeners
+-- Koneksi raid listeners (v10: _WH removed, pakai _raidConns)
 -- [v10] _WH removed
 
 RebuildRaidList = function()
@@ -7318,13 +7314,13 @@ end
 -- Hanya untuk dapat raidId yang dibutuhkan CreateRaidTeam.
 -- ============================================================
 
--- [v10] _WH removed
+_raidConns = {}  -- [v10] dipindah dari _raidConns
 
 DisconnectRaidConns = function()
- for _, conn in ipairs(_WH.raidConns) do
+ for _, conn in ipairs(_raidConns) do
  pcall(function() conn:Disconnect() end)
  end
- _WH.raidConns = {}
+ _raidConns = {}
 end
 
 -- Ekstrak mapNum dari nama child (mis. "RaidEnter7" -> 7)
@@ -7622,7 +7618,7 @@ ConnectRaidListeners = function()
  -- [v10] webhook removed
  end
  end)
- table.insert(_WH.raidConns, conn)
+ table.insert(_raidConns, conn)
  end
 
  -- EnterRaidsUpdateInfo: slotIndex + serverMapId saat masuk map
@@ -7657,7 +7653,7 @@ ConnectRaidListeners = function()
   end
  end
  end)
- table.insert(_WH.raidConns, conn)
+ table.insert(_raidConns, conn)
  end
 end
 
@@ -8674,7 +8670,6 @@ function StartAscensionLoop()
        _ascSuccess = true
        _ascDone = true
        AscStatusUpdate("[FLa] Boss Dead!", Color3.fromRGB(100,255,150))
-      end -- if bossPos
      else
       -- Boss tidak ditemukan setelah 30s - last chance scan
       if not boss then
