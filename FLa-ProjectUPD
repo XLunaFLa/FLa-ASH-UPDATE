@@ -7743,8 +7743,12 @@ _WH.SendRaid = function(url)
  local function resolveGrade(entry)
   local g = entry.grade or "?"
   if g ~= "?" then return g end
-  -- Coba ambil fresh dari cache
-  return _whGetGrade(entry.raidId, entry.mapId, entry.isAscension, entry.mn) or "?"
+  -- [FIX] _whGetGrade tidak ada di scope ini - pakai GetBestGrade langsung
+  if GetBestGrade and entry.mn then
+   local fg = GetBestGrade(entry.mn, entry.isAscension)
+   if fg and fg ~= "?" then return fg end
+  end
+  return "?"
  end
 
  local isDiscord = url:find("discord%.com/api/webhooks")
