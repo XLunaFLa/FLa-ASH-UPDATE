@@ -8092,6 +8092,15 @@ ParseRaidEntry = function(k, info)
  local mapId = info.mapId
  local spawnName = info.spawnName or "RE1001"
  if not raidId or not mapId then return end
+ -- [DEBUG] Print semua field info saat AT entry masuk
+ if mapId and mapId >= 50301 and mapId <= 50326 then
+  print("[AT DEBUG] === RAW INFO dari server ===")
+  print("[AT DEBUG] key =", tostring(k))
+  for _f, _v in pairs(info) do
+   print("[AT DEBUG]", tostring(_f), "=", tostring(_v))
+  end
+  print("[AT DEBUG] ================================")
+ end
  -- Normalize mapId: 50101-50120 -> 50001-50020 (RAID normal)
  if mapId >= 50101 and mapId <= 50120 then
   mapId = mapId - 100
