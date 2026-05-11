@@ -3439,15 +3439,6 @@ end
  _visAutoHide = _autoHideVis
  _autoHideRow.Name = "ZZZ_AutoHide" -- Trik aman! Memaksa posisinya di bawah Count RYB (LayoutOrder 1) tanpa merusak/menggeser LayoutOrder tombol lain.
 
- -- Toggle UI untuk Disable All Animations & Damage Text
-local _animRow, _animSet, _animVis = ToggleRow(p, "DISABLE ALL ANIMATIONS", "Matikan animasi hero & teks damage (Anti-Lag)", 3, function(on)
-    DoDisableAllAnimations(on)
-end)
-_animRow.LayoutOrder = 3 -- eksplisit
-_setAnimToggle = _animSet
-_visDisableAnim = _animVis
-_animRow.Name = "ZZZ_DisableAnim"
-
  --  Toggle Auto Sell (DI BAWAH counter) 
  local _sellToggleRow, _sellToggleSet, _sellVis = ToggleRow(p,"AUTO SELL HERO EQUIP","Auto sell all items (except Locked)",4,function(on)
  _autoSellOn = on
@@ -13874,7 +13865,8 @@ ST2 = {
     inMap          = false,
     attacking      = false,  -- flag mass attack sedang berjalan
     waveCount      = 0,      -- 0 = Non Stop, 1-10 = jumlah wave sebelum keluar
-    attackEnabled  = false,   -- toggle Attack ON/OFF (dari UI)
+    enabled        = false,  -- [FIX] toggle utama ON/OFF - default OFF
+    attackEnabled  = false,  -- toggle Attack ON/OFF (dari UI) - default OFF
     statusLbl      = nil,
     dot            = nil,
     count          = 0,
@@ -13945,34 +13937,49 @@ local function ST2TpIn()
         local reGet    = Remotes:FindFirstChild("GetNewSingleTowerData")
         local reEquip  = Remotes:FindFirstChild("EquipHeroWithData")
         local reTpSucc = Remotes:FindFirstChild("LocalPlayerTeleportSuccess")
+        local reLocal  = Remotes:FindFirstChild("LocalPlayerTeleport")
 
-        -- [v284] Urutan remote baru sesuai SimpleSpy capture:
+        -- [FIX STUCK] Urutan remote: lobby dulu -> konfirmasi -> TP ke tower
         -- Step 1: StartLocalPlayerTeleport mapId 50002 (masuk lobby dulu)
         if reStart then reStart:FireServer({mapId = 50002}) end
-        task.wait(0.3)
+        task.wait(0.5)
 
-        -- Step 2: GetNewSingleTowerData (invoke)
+        -- Step 2: GetNewSingleTowerData (invoke) - ambil data tower baru
         if reGet then pcall(function() reGet:InvokeServer() end) end
-        task.wait(0.3)
+        task.wait(0.4)
 
-        -- Step 3: EquipHeroWithData
+        -- Step 3: EquipHeroWithData - pastikan hero terpasang
         if reEquip then pcall(function() reEquip:FireServer() end) end
-        task.wait(0.3)
+        task.wait(0.4)
 
         -- Step 4: LocalPlayerTeleportSuccess (konfirmasi di lobby)
         if reTpSucc then pcall(function() reTpSucc:InvokeServer() end) end
+        task.wait(0.5)
+
+        -- Step 5: StartLocalPlayerTeleport mapId 50301 + hostId (TP ke Tower Map 2)
+        if reStart then reStart:FireServer({mapId = 50301, hostId = LP.UserId}) end
+        task.wait(0.5)
+
+        -- Step 6: [FIX STUCK] LocalPlayerTeleport tambahan agar game akui masuk tower
+        if reLocal then pcall(function() reLocal:FireServer({mapId = 50301, hostId = LP.UserId}) end) end
         task.wait(0.3)
 
-        -- Step 5: StartLocalPlayerTeleport mapId 50301 + hostId
-        if reStart then reStart:FireServer({mapId = 50301, hostId = 7098669448}) end
-        task.wait(0.3)
-
-        -- Step 6: EquipHeroWithData (setelah TP ke 50301)
+        -- Step 7: EquipHeroWithData (setelah TP ke 50301)
         if reEquip then pcall(function() reEquip:FireServer() end) end
+        task.wait(0.4)
+
+        -- Step 8: LocalPlayerTeleportSuccess (konfirmasi masuk 50301)
+        if reTpSucc then pcall(function() reTpSucc:InvokeServer() end) end
         task.wait(0.3)
 
-        -- Step 7: LocalPlayerTeleportSuccess (konfirmasi masuk 50301)
-        if reTpSucc then pcall(function() reTpSucc:InvokeServer() end) end
+        -- Step 9: [FIX STUCK] Ulangi StartLocalPlayerTeleport ke 50301 sekali lagi
+        -- Sebagian user butuh 2x fire untuk benar-benar masuk ke dalam tower
+        if not ST2IsInMap() then
+            task.wait(0.5)
+            if reStart then reStart:FireServer({mapId = 50301, hostId = LP.UserId}) end
+            task.wait(0.4)
+            if reTpSucc then pcall(function() reTpSucc:InvokeServer() end) end
+        end
     end)
 end
 
@@ -14033,10 +14040,19 @@ function StartST2Loop()
         pcall(function()
             while ST2.running do
                 repeat
-                -- [v62 FIX] Jika running di-OFF saat loop sedang berjalan, langsung stop
+                -- [FIX] Jika running di-OFF saat loop sedang berjalan, langsung stop
                 if not ST2.running then return end
 
-                -- [v62 FIX] Jika Attack OFF, standby di luar map (bukan di dalam)
+                -- [FIX] Jika toggle utama OFF, STOP TOTAL - tidak masuk map sama sekali
+                if not ST2.enabled then
+                    ST2Status("[||] Toggle OFF - STOP masuk map.", Color3.fromRGB(180,60,60))
+                    while ST2.running and not ST2.enabled do
+                        task.wait(0.3)
+                    end
+                    if not ST2.running then return end
+                end
+
+                -- [FIX] Jika Attack OFF, standby di luar map (bukan di dalam)
                 -- Waiting di dalam map -> IsAnyMapActive() true -> semua fitur freeze
                 if not ST2.attackEnabled then
                     ST2Status("[||] Attack OFF - standby...", Color3.fromRGB(180,100,60))
@@ -14313,9 +14329,22 @@ do
     ST2.statusLbl.Position = UDim2.new(0,22,0,0)
     ST2.statusLbl.TextTruncate = Enum.TextTruncate.AtEnd
 
-    -- Toggle ON/OFF
+    -- Toggle ON/OFF - default OFF
     local _st2ToggleRow, _setST2Toggle, _st2Vis = ToggleRow(inner,"Auto Single Tower Map 2","ON = ENTER",1,function(on)
-        if on then StartST2Loop() else StopST2() end
+        ST2.enabled = on
+        if on then
+            StartST2Loop()
+        else
+            -- [FIX] Toggle OFF: langsung stop masuk map
+            ST2.enabled = false
+            if ST2.running then
+                ST2.running = false
+                if ST2.thread then pcall(function() task.cancel(ST2.thread) end); ST2.thread = nil end
+            end
+            ST2.inMap = false
+            ST2.attacking = false
+            ST2Status("[.] Idle - Toggle OFF", Color3.fromRGB(100,100,100))
+        end
     end)
     _visST2 = _st2Vis
 
@@ -14400,18 +14429,17 @@ do
     end)
 
     -- -- Toggle Attack ---------------------------------------------------------
-    -- [v285] Toggle ON/OFF untuk fungsi Attack (Mass Attack Kill All)
-    -- Jika OFF: loop tetap jalan (masuk map, tunggu), tapi tidak menyerang
-    -- Sinkronisasi balik: ST2.setAttackToggle di-set agar logic bisa sync UI
+    -- Toggle ON/OFF untuk fungsi Attack (Mass Attack Kill All)
+    -- Default OFF: user harus aktifkan manual
     local _, setAtkToggle = ToggleRow(inner, "Attack", "ATTACK ALL ENEMY", 3, function(on)
         ST2.attackEnabled = on
     end)
-    -- Default ON, sync ke state awal
-    ST2.attackEnabled  = true
+    -- [FIX] Default OFF - user aktifkan manual
+    ST2.attackEnabled  = false
     ST2.setAttackToggle = setAtkToggle
-    -- Langsung set visual ke ON
+    -- Pastikan visual juga OFF saat init
     task.defer(function()
-        if setAtkToggle then setAtkToggle(true) end
+        if setAtkToggle then setAtkToggle(false) end
     end)
 
     -- Info card
