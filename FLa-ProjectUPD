@@ -8103,9 +8103,17 @@ ParseRaidEntry = function(k, info)
  -- ASC: mapNum = mapId - 50300 (Tower 1-26), RAID: mapNum = mapId - 50000 (Map 1-20)
  local mapNum = isAscEntry and (mapId - 50300) or (mapId - 50000)
  local mapName = MAP_NAMES[mapNum] or ("Map "..mapNum)
- -- Grade: ASC pakai _runeGradeCache[negatif] dari chat parser, RAID pakai RAID_CONFIG_GRADE
+ -- Grade: baca langsung dari info server (AT dan normal raid sama - server kirim grade di info)
  local _ascCacheKey = isAscEntry and (-mapNum) or nil
- local grade = (RAID_CONFIG_GRADE and RAID_CONFIG_GRADE[raidId])
+ -- Prioritas: info.grade dari server -> RAID_CONFIG_GRADE formula -> chat cache -> "?"
+ local _infoGrade = nil
+ if info.grade and type(info.grade) == "string" and #info.grade > 0 then
+  _infoGrade = info.grade:upper()
+ elseif info.rank and type(info.rank) == "string" and #info.rank > 0 then
+  _infoGrade = info.rank:upper()
+ end
+ local grade = _infoGrade
+  or (RAID_CONFIG_GRADE and RAID_CONFIG_GRADE[raidId])
   or (_ascCacheKey and _runeGradeCache and _runeGradeCache[_ascCacheKey])
   or (isAscEntry and _ASC_CHAT_CACHE and _ASC_CHAT_CACHE[mapNum] and _ASC_CHAT_CACHE[mapNum].grade)
   or (_runeGradeCache and _runeGradeCache[mapNum])
@@ -8149,13 +8157,18 @@ function GetBestGrade(mapNum, isAscension)
    end
   end
  end
- -- 2. Chat cache (fallback) - gunakan cacheKey sesuai mode
+ -- 2. RAID_LIVE entry grade (sudah diisi dari info.grade server - prioritas tinggi untuk AT)
+ for _, ent in pairs(RAID_LIVE) do
+  if ent.mapId == mapId and ent.grade and ent.grade ~= "?" then
+   return ent.grade
+  end
+ end
+ -- 3. Chat cache (fallback terakhir)
  if _runeGradeCache then
   if _runeGradeCache[cacheKey] then return _runeGradeCache[cacheKey] end
-  -- Fallback ke positif jika negatif tidak ada
   if isAscension and _runeGradeCache[mapNum] then return _runeGradeCache[mapNum] end
  end
- -- 3. RAID_LIVE entry grade field
+ -- 4. RAID_LIVE entry grade field (scan ulang - sama seperti di atas tapi tanpa filter mapId)
  for _, ent in pairs(RAID_LIVE) do
   if ent.mapId == mapId and ent.grade and ent.grade ~= "?" then
    if isAscension and ent.isAscension then return ent.grade end
