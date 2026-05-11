@@ -7188,15 +7188,18 @@ GRADE_RANK = {
 -- RAID_CONFIG_GRADE: Normal Raid only (raidId 930001+)
 RAID_CONFIG_GRADE = setmetatable({}, {
  __index = function(_, raidId)
- if type(raidId) ~= "number" then return nil end
- -- [FIX] AT raidId >= 935001: grade HANYA dari chat, bukan formula
- if raidId >= 935001 then return nil end
- if raidId >= 930001 then
- local _nr = {"D","B","S","SS","G","N","M+","M++","XM","ULT"}
- local slot = (raidId - 930001) % 10
- return _nr[slot + 1]
- end
- return nil
+  if type(raidId) ~= "number" then return nil end
+  local _nr = {"D","B","S","SS","G","N","M+","M++","XM","ULT"}
+  -- Normal raid dan AT: formula sama persis, hanya base raidId berbeda
+  if raidId >= 935001 then
+   local slot = (raidId - 935001) % 10
+   return _nr[slot + 1]
+  end
+  if raidId >= 930001 then
+   local slot = (raidId - 930001) % 10
+   return _nr[slot + 1]
+  end
+  return nil
  end
 })
 
@@ -7246,7 +7249,6 @@ function ParseChatLine(text)
   if text:find("Ascension Tower", 1, true) then
    local towerNum = tonumber(text:match("Ascension Tower (%d+)"))
    local grade    = extractGradeLast(text)
-   print("[PCL AT]", "towerNum=", tostring(towerNum), "grade=", tostring(grade), "WH.AddLine=", tostring(_WH and _WH.AddLine))
    if towerNum and grade then
     -- Cache key negatif agar tidak bentrok dengan normal raid (map 1-20)
     _runeGradeCache[-towerNum] = grade
@@ -7731,22 +7733,20 @@ _WH.SendRaid = function(url)
  for _, entry in pairs(src or {}) do
   table.insert(raidList, entry)
  end
- -- Sort: normal (mapId 500xx) dulu, AT (mapId 503xx) belakangan, masing-masing by mn
+ -- Sort: semua raid urut by mn (mapNum) - AT dan normal diperlakukan sama
  table.sort(raidList, function(a, b)
-  local aAT = a.isAscension and true or false
-  local bAT = b.isAscension and true or false
-  if aAT ~= bAT then return not aAT end
   return (a.mn or a.mapId or 0) < (b.mn or b.mapId or 0)
  end)
  if #raidList == 0 then return end
 
- -- Grade resolver: untuk entry WH_LIVE pakai _whGetGrade, untuk fallback RAID_LIVE pakai entry.grade
+ -- Grade resolver: AT dan normal raid sama persis - keduanya dari RAID_CONFIG_GRADE via raidId
  local function resolveGrade(entry)
+  -- 1. Grade sudah ada di entry
   local g = entry.grade or "?"
   if g ~= "?" then return g end
-  -- [FIX] _whGetGrade tidak ada di scope ini - pakai GetBestGrade langsung
-  if GetBestGrade and entry.mn then
-   local fg = GetBestGrade(entry.mn, entry.isAscension)
+  -- 2. Formula raidId - sama untuk AT (935001+) dan normal (930001+)
+  if entry.raidId and RAID_CONFIG_GRADE then
+   local fg = RAID_CONFIG_GRADE[entry.raidId]
    if fg and fg ~= "?" then return fg end
   end
   return "?"
@@ -8093,15 +8093,7 @@ ParseRaidEntry = function(k, info)
  local mapId = info.mapId
  local spawnName = info.spawnName or "RE1001"
  if not raidId or not mapId then return end
- -- [DEBUG] Print semua field info saat AT entry masuk
- if mapId and mapId >= 50301 and mapId <= 50326 then
-  print("[AT DEBUG] === RAW INFO dari server ===")
-  print("[AT DEBUG] key =", tostring(k))
-  for _f, _v in pairs(info) do
-   print("[AT DEBUG]", tostring(_f), "=", tostring(_v))
-  end
-  print("[AT DEBUG] ================================")
- end
+
  -- Normalize mapId: 50101-50120 -> 50001-50020 (RAID normal)
  if mapId >= 50101 and mapId <= 50120 then
   mapId = mapId - 100
@@ -8430,29 +8422,8 @@ ConnectRaidListeners = function()
  local rank = SPAWN_RANK[spawnName] or 0
  -- [v271] Grade dari RAID_CONFIG_GRADE (formula matematika, cover semua seri)
  -- [FIX] AT: cache key negatif (-mapNum), RAID normal: positif (mapNum)
- local _grCacheKey = _isAscMapId and (-mapNum) or mapNum
- -- [FIX] Baca grade langsung dari info server - AT dan normal raid sama
- local _infoGrade = nil
- if type(info.grade) == "string" and #info.grade > 0 then
-  _infoGrade = info.grade:upper()
- elseif type(info.rank) == "string" and #info.rank > 0 then
-  _infoGrade = info.rank:upper()
- end
- -- [DEBUG] Print semua field info AT untuk lihat nama field grade dari server
- if _isAscMapId or _isAscById then
-  print("[AT DEBUG] === RAW INFO ===")
-  print("[AT DEBUG] raidId =", tostring(raidId), "mapId =", tostring(mapId))
-  for _f, _v in pairs(info) do
-   print("[AT DEBUG]", tostring(_f), "=", tostring(_v))
-  end
-  print("[AT DEBUG] _infoGrade =", tostring(_infoGrade))
-  print("[AT DEBUG] =============")
- end
- local grade = _infoGrade
-  or (RAID_CONFIG_GRADE and RAID_CONFIG_GRADE[raidId])
-  or (_runeGradeCache and _runeGradeCache[_grCacheKey])
-  or (_ASC_CHAT_CACHE and _isAscMapId and _ASC_CHAT_CACHE[mapNum] and _ASC_CHAT_CACHE[mapNum].grade)
-  or "?"
+ -- Grade: AT dan normal raid sama persis - formula raidId via RAID_CONFIG_GRADE
+ local grade = (RAID_CONFIG_GRADE and RAID_CONFIG_GRADE[raidId]) or "?"
  local tempKey = -(mapId) -- key entry chat Ascension (negatif)
  -- Detect isAscension: 3 sumber (makin akurat, tidak rely on chat saja)
  -- 1. raidId >= 935001 -> pasti Ascension Tower (confirmed SimpleSPY: 936501)
@@ -8482,6 +8453,7 @@ ConnectRaidListeners = function()
  local entryData = {
  raidId = raidId,
  mapId = mapId,
+ mn = mapNum, -- [FIX] AT dan normal raid pakai mn yang sama untuk sort
  spawnName = spawnName,
  rank = rank,
  grade = grade,
