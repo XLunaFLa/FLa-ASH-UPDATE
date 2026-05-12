@@ -7441,6 +7441,7 @@ task.spawn(function()
  end
  end)
  _whSilent = false
+ _whResetSentCache() -- [BUG FIX 4] Scan awal selesai, reset cache agar notif server pertama kali bisa kirim
  end)
 end)
 
@@ -7602,6 +7603,14 @@ local function _WH_resolveGrade(ent)
 end
 local _whBufferTimer   = nil  -- debounce handle
 local _whLastSent      = 0
+-- [BUG FIX 4] Cache teks webhook yang sudah pernah dikirim di event server ini.
+-- Reset hanya saat RAID_LIVE kosong total (event habis / server baru).
+-- Ini cegah spam: ParseChatLine + RebuildRaidList + _onRaidChildAdded semua bisa
+-- panggil AddLine untuk teks yang SAMA berkali-kali.
+local _whSentCache     = {}
+local function _whResetSentCache()
+ _whSentCache = {}
+end
 
 local GRADE_COLOR = {
  ["E"]=9868950,  ["D"]=6604900,  ["C"]=5294200,  ["B"]=6589695,
@@ -7749,10 +7758,13 @@ end
 _WH.AddLine = function(text)
  if not _webhookEnabled or not _webhookUrl or _webhookUrl == "" then return end
  if _whSilent then return end
+ -- [BUG FIX 4] Cek cache global per-event: jika teks ini sudah pernah dikirim di event ini, skip
+ if _whSentCache[text] then return end
  -- Cek apakah sudah ada baris identik dalam buffer (anti duplikat)
  for _, existing in ipairs(_whBuffer) do
   if existing == text then return end
  end
+ _whSentCache[text] = true  -- [BUG FIX 4] Tandai teks ini sudah masuk (tidak akan kirim lagi)
  table.insert(_whBuffer, text)
  -- Reset debounce: tunggu 3 detik setelah baris terakhir baru kirim
  if _whBufferTimer then pcall(function() task.cancel(_whBufferTimer) end) end
@@ -8202,9 +8214,14 @@ local function _onRaidChildRemoved(child)
  RAID_LIVE[rid] = nil; changed = true
  end
  end
- if changed then RebuildRaidList() end
+ if changed then
+  RebuildRaidList()
+  -- [BUG FIX 4] Jika RAID_LIVE kosong total, reset sent-cache agar event berikutnya bisa kirim notif baru
+  local anyLeft = false
+  for _ in pairs(RAID_LIVE) do anyLeft = true; break end
+  if not anyLeft then _whResetSentCache() end
+ end
 end
-
 -- Pasang watcher ke satu slot (RE1001 atau RE1002)
 local function _watchRaidSlot(reFolder)
  if not reFolder then return end
@@ -9207,9 +9224,12 @@ function StartAscensionLoop()
     local _ascDone = false
     local _ascSuccess = false
     local connAS, connAF
+    -- [BUG FIX 1&2] _ascServerDone = server bilang sukses, tapi TIDAK interrupt attack loop.
+    -- _ascDone hanya di-set true dari Fail event (batal total) atau setelah attack loop selesai.
+    local _ascServerDone = false
     local _reAS = Remotes:FindFirstChild("ChallengeRaidsSuccess")
     local _reAF = Remotes:FindFirstChild("ChallengeRaidsFail")
-    if _reAS then connAS = _reAS.OnClientEvent:Connect(function() _ascDone = true; _ascSuccess = true end) end
+    if _reAS then connAS = _reAS.OnClientEvent:Connect(function() _ascServerDone = true; _ascSuccess = true end) end
     if _reAF then connAF = _reAF.OnClientEvent:Connect(function() _ascDone = true end) end
 
     -- STEP 4: Dalam map - equip hero
@@ -9546,7 +9566,10 @@ function StartAscensionLoop()
 
        -- 7) Serang boss (sama dengan RAID: 0.08s per attack)
        AscStatusUpdate("[FLa] Attack: "..boss.model.Name, Color3.fromRGB(255,80,80))
-       while ASC.running and not _ascDone do
+       -- [BUG FIX 1&2] Attack loop TIDAK pakai _ascDone sebagai stop condition.
+       -- _ascServerDone (ChallengeRaidsSuccess) tidak boleh interrupt attack di tengah.
+       -- Attack berhenti hanya saat: boss HP=0, boss hilang, atau player keluar tower.
+       while ASC.running do
         -- [v48] Validasi: player harus masih di Ascension Tower
         local _curMap = GetCurrentMapId()
         if _curMap and (_curMap < 50301 or _curMap > 50326) then
@@ -9563,7 +9586,8 @@ function StartAscensionLoop()
        end
 
        pcall(function() task.cancel(_tpTh) end)
-       _ascSuccess = true
+       -- [BUG FIX 1&2] Setelah attack loop selesai, gabungkan _ascServerDone ke _ascSuccess.
+       if _ascServerDone then _ascSuccess = true end
        _ascDone = true
        AscStatusUpdate("[FLa] Boss Dead!", Color3.fromRGB(100,255,150))
       end -- if bossPos
@@ -10779,13 +10803,17 @@ local function ResolveEntry()
  local _raidSuccess = false
 
  local connS, connF
+ -- [BUG FIX 1&2] _raidDone hanya diset SETELAH attack loop selesai.
+ -- ChallengeRaidsSuccess tidak boleh interrupt attack di tengah jalan.
+ -- _raidServerDone = flag bahwa server sudah bilang sukses (tapi attack tetap jalan sampai boss mati)
+ local _raidServerDone = false
  local _reS = Remotes:FindFirstChild("ChallengeRaidsSuccess")
  local _reF = Remotes:FindFirstChild("ChallengeRaidsFail")
  if _reS then connS = _reS.OnClientEvent:Connect(function()
- RAID._raidDone = true; _raidSuccess = true
+ _raidServerDone = true; _raidSuccess = true
  end) end
  if _reF then connF = _reF.OnClientEvent:Connect(function()
- RAID._raidDone = true
+ RAID._raidDone = true -- fail: langsung keluar
  end) end
 
  -- [v62 FIX] Loading wait: tunggu sampai minimal ada 1 enemy di workspace ATAU boss early detect
@@ -10820,7 +10848,7 @@ local function ResolveEntry()
   return IsBossEarly(name)
  end
 
- while _loadWait < 12 and RAID.running and not _raidDone do
+ while _loadWait < 12 and RAID.running and not RAID._raidDone do
       task.wait(0.5); _loadWait = _loadWait + 0.5
       -- Cek apakah sudah ada enemy di workspace (map sudah populated)
       local _bList = GetRaidEnemies()
@@ -11117,7 +11145,10 @@ local function ResolveEntry()
  -- 7) SERANG BOSS - langsung tanpa jeda
  RaidStatusUpdate("[FLa] Attack: " .. boss.model.Name, Color3.fromRGB(255,80,80))
  local _outOfMapCount = 0 -- [BUG FIX v49] debounce counter agar tidak false-break karena lag spike
- while RAID.running and not RAID._raidDone do
+ -- [BUG FIX 1&2] Attack loop TIDAK pakai RAID._raidDone sebagai stop condition.
+ -- Server event ChallengeRaidsSuccess (_raidServerDone) tidak boleh interrupt attack di tengah.
+ -- Attack berhenti hanya saat: boss HP=0, boss hilang, atau player keluar map.
+ while RAID.running do
  -- [FIX GODMODE] Validasi realtime: player harus masih di raid map (50101-50120)
  -- Jika sudah keluar ke basemap, stop serang boss
  -- [BUG FIX v49] Debounce: harus 3x frame berturut-turut baru break (anti false-positive lag spike)
@@ -11141,7 +11172,9 @@ local function ResolveEntry()
  end
 
  pcall(function() task.cancel(_tpTh) end)
- _raidSuccess = true
+ -- [BUG FIX 1&2] Setelah attack loop selesai, baru set _raidDone.
+ -- Jika server sudah kirim sukses (_raidServerDone), gabungkan ke _raidSuccess.
+ if _raidServerDone then _raidSuccess = true end
  RAID._raidDone = true
  RaidStatusUpdate("[FLa] Boss Dead!", Color3.fromRGB(100,255,150))
  end -- if RAID.running after delay
@@ -11268,6 +11301,8 @@ local function ResolveEntry()
  -- [FIX v256] Cooldown 12s: server butuh ~12s sebelum bisa masuk Raid lagi
  -- TAPI: selama cooldown, tetap scan workspace agar RAID_LIVE siap
  -- Saat cooldown habis, langsung masuk tanpa delay tambahan
+ -- [BUG FIX 3] Tandai cooldown aktif agar standby loop tidak terburu-buru masuk
+ RAID._cooldownActive = true
  for cd = 14, 1, -1 do
  if not RAID.running then break end
  -- [INDEPENDEN] tidak tunggu siege setelah exit raid
@@ -11277,6 +11312,7 @@ local function ResolveEntry()
  if RAID.dot then RAID.dot.BackgroundColor3 = Color3.fromRGB(255,200,60) end
  task.wait(1)
  end
+ RAID._cooldownActive = false -- [BUG FIX 3] Cooldown selesai, standby loop boleh masuk
 
  -- [v247] STEP 7: Setelah cooldown selesai:
  -- 1. Jika SIEGE aktif/running -> tunggu SIEGE selesai total dulu (PRIORITAS atas MA)
@@ -11311,7 +11347,8 @@ local function ResolveEntry()
             else
                 -- Jika aman, baru boleh cari Raid
                 -- Cek IsRaidLiveInGame DULU sebelum ResolveEntry
-                if IsRaidLiveInGame() then
+                -- [BUG FIX 3] Jangan break jika cooldown masih aktif
+                if not RAID._cooldownActive and IsRaidLiveInGame() then
                     local _newEntry = ResolveEntry and ResolveEntry()
                     if _newEntry then raidEntry = _newEntry; break end
                     RaidStatusUpdate("[FLa] Waiting grade filter... (" .. _fw .. "s)", Color3.fromRGB(200,255,150))
