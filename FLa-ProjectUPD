@@ -7255,60 +7255,25 @@ function ParseChatLine(text)
   -- ASCENSION TOWER: "appeared in Ascension Tower 4 - [Monarch] Grendal+1 [E]"
   if text:find("Ascension Tower", 1, true) then
    local towerNum = tonumber(text:match("Ascension Tower (%d+)"))
-   -- Coba ambil bossName dari teks: "Tower X - [Title] BossName [Grade]"
-   local _bossRaw = text:match("Ascension Tower %d+ %- (.+)$")
-   local _bossName = nil
-   if _bossRaw then
-    -- Strip grade bracket terakhir dan title bracket
-    _bossName = _bossRaw:gsub("%[M%+%+%]",""):gsub("%[M%+%]",""):gsub("%[SS%]",""):gsub("%[XM%]",""):gsub("%[ULT%]",""):gsub("%[GOD%]",""):gsub("%[[EDCBAGSN]%]",""):gsub("%[[^%]]+%]",""):match("^%s*(.-)%s*$")
-    if _bossName and #_bossName < 2 then _bossName = nil end
-   end
    local grade    = extractGradeLast(text)
    if towerNum and grade then
     -- Cache key negatif agar tidak bentrok dengan normal raid (map 1-20)
     _runeGradeCache[-towerNum] = grade
     if not _ASC_CHAT_CACHE then _ASC_CHAT_CACHE = {} end
-    _ASC_CHAT_CACHE[towerNum] = { grade = grade, bossName = _bossName, time = os.time() }
-
-    -- [FIX BUG #1] Buat/update entry RAID_LIVE dengan mapId BENAR (50300+towerNum)
-    -- Sebelumnya tidak ada entry sama sekali -> TriggerEntryWakeup tidak deteksi AT
-    local _ascMapId  = 50300 + towerNum
-    local _ascTmpKey = -(_ascMapId)
-    -- Cari entry yang sudah ada (dari UpdateRaidInfo atau workspace)
-    local _existingKey = nil
+    _ASC_CHAT_CACHE[towerNum] = { grade = grade, time = os.time() }
+    -- [FIX TIMING] update RAID_LIVE entry AT yang sudah ada tapi grade masih "?"
     for _rid, _ent in pairs(RAID_LIVE) do
      if _ent.isAscension and _ent.mapId then
-      local _mn2 = (_ent.mapId >= 50301 and _ent.mapId <= 50326 and (_ent.mapId - 50300))
-       or (_ent.mapId >= 50001 and _ent.mapId <= 50026 and (_ent.mapId - 50000))
-       or nil
-      if _mn2 == towerNum then
-       _existingKey = _rid
-       -- Update grade dan bossName entry yang sudah ada
-       if _ent.grade == "?" or not _ent.grade then _ent.grade = grade end
-       if _bossName and not _ent.bossName then _ent.bossName = _bossName end
-       _ent.label = "Ascension Tower "..towerNum..(_ent.bossName and (" - "..(_ent.bossName:gsub("^%l",string.upper))) or "").." ["..(_ent.grade or grade).."]"
-       break
+      local _mn2 = (_ent.mapId >= 50301 and _ent.mapId <= 50326)
+       and (_ent.mapId - 50300) or nil
+      if _mn2 == towerNum and (_ent.grade == "?" or not _ent.grade) then
+       _ent.grade = grade
+       _ent.label = "Ascension Tower ".._mn2.." ["..grade.."]"
       end
      end
     end
-    -- Jika belum ada entry sama sekali: buat tempEntry dengan mapId benar
-    if not _existingKey then
-     RAID_LIVE[_ascTmpKey] = {
-      raidId      = _ascTmpKey,
-      mapId       = _ascMapId,
-      spawnName   = "RE1001",
-      rank        = 0,
-      grade       = grade,
-      endTime     = nil,
-      _tempEntry  = true,
-      isAscension = true,
-      bossName    = _bossName,
-      label       = "Ascension Tower "..towerNum..(_bossName and (" - "..(_bossName:gsub("^%l",string.upper))) or "").." ["..grade.."]",
-     }
-    end
-
     if RebuildRaidList then pcall(RebuildRaidList) end
-    -- [WEBHOOK BUG #2] Kirim teks mentah ke buffer webhook
+    -- [WEBHOOK PURE] Kirim teks mentah langsung ke buffer webhook
     if _WH and _WH.AddLine then
      _WH.AddLine("The MaFissure appeared in Ascension Tower "..towerNum.." ["..grade.."]")
     end
@@ -7628,6 +7593,9 @@ local function _extractGradeLast(t)
 end
 
 -- Kirim buffer ke Discord/Telegram, lalu kosongkan buffer
+-- [FIX v272] Grade diambil LANGSUNG dari _ASC_CHAT_CACHE / _runeGradeCache
+-- bukan hanya dari ekstraksi teks (yang bisa "?" kalau format berubah)
+-- Embed Discord diperkaya: nama map, boss AT, timestamp, grade per-entry
 _whFlushBuffer = function(url)
  if #_whBuffer == 0 then return end
  local lines   = _whBuffer
@@ -7640,37 +7608,143 @@ _whFlushBuffer = function(url)
  local isTelegram = url:find("api%.telegram%.org")
  local HS = game:GetService("HttpService")
 
- -- [FIX BUG #2] Kirim PLAIN TEXT MENTAH persis seperti notif game
- -- Format: satu baris per raid/AT, persis teks dari TipsPanel
- -- Contoh:
- --   The MaFissure appeared in Ascension Tower 7 [S]
- --   The MaFissure appeared in 20,Dragonball Wasteland [B]
- local lines_normal, lines_at = {}, {}
+ -- [FIX v272] Helper: ambil grade AKURAT dari cache, bukan hanya teks
+ -- Prioritas: _ASC_CHAT_CACHE -> _runeGradeCache -> ekstraksi teks (last resort)
+ local function _getAccurateGrade(line, isAT, mapNum)
+  if isAT and mapNum then
+   -- Cek _ASC_CHAT_CACHE dulu (paling akurat untuk AT)
+   if _ASC_CHAT_CACHE then
+    local _ce = _ASC_CHAT_CACHE[mapNum]
+    if _ce and _ce.grade and _ce.grade ~= "?" then return _ce.grade end
+   end
+   -- Fallback ke _runeGradeCache key negatif
+   if _runeGradeCache then
+    local _cg = _runeGradeCache[-mapNum]
+    if _cg and _cg ~= "?" then return _cg end
+   end
+  elseif not isAT and mapNum then
+   -- RAID Normal: _runeGradeCache key positif
+   if _runeGradeCache then
+    local _cg = _runeGradeCache[mapNum]
+    if _cg and _cg ~= "?" then return _cg end
+   end
+  end
+  -- Last resort: ekstraksi dari teks
+  return _extractGradeLast(line) or "?"
+ end
+
+ -- Parse setiap baris jadi struct yang lebih kaya informasi
+ local entries_normal, entries_at = {}, {}
+ local topGrade = "E"
+
  for _, line in ipairs(lines) do
-  if line:find("Ascension Tower", 1, true) then
-   table.insert(lines_at, line)
+  local isAT = line:find("Ascension Tower", 1, true)
+  if isAT then
+   local towerNum = tonumber(line:match("Ascension Tower (%d+)"))
+   local grade    = _getAccurateGrade(line, true, towerNum)
+   if (GRADE_RANK_W[grade] or 0) > (GRADE_RANK_W[topGrade] or 0) then topGrade = grade end
+   -- Ambil boss name dari _ASC_CHAT_CACHE jika ada
+   local bossName = nil
+   if _ASC_CHAT_CACHE and towerNum and _ASC_CHAT_CACHE[towerNum] then
+    bossName = _ASC_CHAT_CACHE[towerNum].bossName
+   end
+   table.insert(entries_at, {
+    towerNum = towerNum,
+    grade    = grade,
+    bossName = bossName,
+    raw      = line,
+   })
   else
-   table.insert(lines_normal, line)
+   local mapNum = tonumber(line:match("appeared in (%d+)"))
+   local grade  = _getAccurateGrade(line, false, mapNum)
+   if (GRADE_RANK_W[grade] or 0) > (GRADE_RANK_W[topGrade] or 0) then topGrade = grade end
+   local mapName = (MAP_NAMES and mapNum and MAP_NAMES[mapNum]) or (mapNum and ("Map "..mapNum)) or "?"
+   table.insert(entries_normal, {
+    mapNum  = mapNum,
+    mapName = mapName,
+    grade   = grade,
+    raw     = line,
+   })
   end
  end
 
- -- Susun pesan: AT dulu, lalu Normal Raid
- local outLines = {}
- for _, l in ipairs(lines_at)     do table.insert(outLines, l) end
- for _, l in ipairs(lines_normal) do table.insert(outLines, l) end
- local plainMsg = table.concat(outLines, "\n")
+ local total = #entries_normal + #entries_at
 
  if isDiscord then
+  local fields = {}
+
+  -- Field Normal Raid: satu baris per map, tampilkan nama map + grade
+  if #entries_normal > 0 then
+   local valLines = {}
+   for _, e in ipairs(entries_normal) do
+    local gradeStr = e.grade ~= "?" and ("**["..e.grade.."]**") or "[?]"
+    local mapStr   = e.mapNum and ("Map "..e.mapNum.." - "..e.mapName) or e.raw
+    table.insert(valLines, gradeStr.." "..mapStr)
+   end
+   table.insert(fields, {
+    name   = "⚔️ Normal Raid ("..#entries_normal..")",
+    value  = table.concat(valLines, "\n"),
+    inline = false,
+   })
+  end
+
+  -- Field Ascension Tower: satu baris per tower, tampilkan tower num + boss + grade
+  if #entries_at > 0 then
+   local valLines = {}
+   for _, e in ipairs(entries_at) do
+    local gradeStr = e.grade ~= "?" and ("**["..e.grade.."]**") or "[?]"
+    local tStr     = e.towerNum and ("Tower "..e.towerNum) or "Tower ?"
+    local bossStr  = e.bossName and (" › "..e.bossName) or ""
+    table.insert(valLines, gradeStr.." "..tStr..bossStr)
+   end
+   table.insert(fields, {
+    name   = "🏯 Ascension Tower ("..#entries_at..")",
+    value  = table.concat(valLines, "\n"),
+    inline = false,
+   })
+  end
+
+  local color   = GRADE_COLOR[topGrade] or GRADE_COLOR["E"]
+  -- Timestamp format sederhana (epoch -> readable)
+  local _ts = os.date and os.date("!%Y-%m-%d %H:%M UTC") or "N/A"
+
+  local payload = {embeds = {{
+   title       = "🔴 RAID OPEN — Top Rank: "..topGrade,
+   description = "Total **"..total.."** raid/tower aktif sekarang",
+   color       = color,
+   fields      = fields,
+   footer      = {text = "ASH GUI FLa Project • ".. _ts},
+   timestamp   = os.date and os.date("!%Y-%m-%dT%H:%M:%SZ") or nil,
+  }}}
+
   pcall(function()
    reqFunc({
     Url     = url,
     Method  = "POST",
     Headers = {["Content-Type"] = "application/json"},
-    Body    = HS:JSONEncode({ content = plainMsg }),
+    Body    = HS:JSONEncode(payload),
    })
   end)
+
  elseif isTelegram then
-  _doSend(url, plainMsg)
+  -- Telegram: format teks lebih rapi dengan grade & nama
+  local out = {"🔴 *RAID OPEN* — Top Rank: *"..topGrade.."*"}
+  if #entries_normal > 0 then
+   table.insert(out, "\n⚔️ *Normal Raid ("..#entries_normal..")*")
+   for _, e in ipairs(entries_normal) do
+    local mapStr = e.mapNum and ("Map "..e.mapNum.." - "..e.mapName) or e.raw
+    table.insert(out, "• ["..e.grade.."] "..mapStr)
+   end
+  end
+  if #entries_at > 0 then
+   table.insert(out, "\n🏯 *Ascension Tower ("..#entries_at..")*")
+   for _, e in ipairs(entries_at) do
+    local tStr    = e.towerNum and ("Tower "..e.towerNum) or "Tower ?"
+    local bossStr = e.bossName and (" - "..e.bossName) or ""
+    table.insert(out, "• ["..e.grade.."] "..tStr..bossStr)
+   end
+  end
+  _doSend(url, table.concat(out, "\n"))
  end
 end
 
@@ -7968,10 +8042,30 @@ end
 -- [v270] GetBestGrade: grade dari RAID_CONFIG_GRADE via raidId (akurat 100%)
 -- Fallback: _runeGradeCache (chat/popup), lalu RAID_LIVE entry grade field
 -- mapNum = angka map (1-18), return string grade atau nil
+-- [FIX v272] Ascension: prioritaskan _ASC_CHAT_CACHE DULU sebelum RAID_CONFIG_GRADE
+-- karena RAID_CONFIG_GRADE butuh raidId positif dari server (belum tentu ada saat ResolveAscEntry dipanggil)
+-- _ASC_CHAT_CACHE diisi ParseChatLine dari TipsPanel (datang LEBIH AWAL dari UpdateRaidInfo server)
 function GetBestGrade(mapNum, isAscension)
  local mapId = isAscension and (50300 + mapNum) or (50000 + mapNum)
  local cacheKey = isAscension and (-mapNum) or mapNum
- -- 1. RAID_CONFIG_GRADE via raidId - berlaku untuk RAID normal DAN ASC (struktur raidId sama)
+
+ -- [FIX v272] PRIORITAS 0 (khusus Ascension): _ASC_CHAT_CACHE adalah sumber tercepat dan paling akurat
+ -- TipsPanel (ParseChatLine) datang SEBELUM UpdateRaidInfo dari server, jadi ini harus dicek PERTAMA
+ if isAscension and _ASC_CHAT_CACHE then
+  local _ascEntry = _ASC_CHAT_CACHE[mapNum]
+  if _ascEntry and _ascEntry.grade and _ascEntry.grade ~= "?" then
+   return _ascEntry.grade
+  end
+ end
+
+ -- PRIORITAS 1: _runeGradeCache dengan key negatif (diisi ParseChatLine bersamaan dengan _ASC_CHAT_CACHE)
+ if isAscension and _runeGradeCache then
+  local _cg = _runeGradeCache[-mapNum] or _runeGradeCache[cacheKey]
+  if _cg and _cg ~= "?" then return _cg end
+ end
+
+ -- PRIORITAS 2: RAID_CONFIG_GRADE via raidId positif dari server (datang LEBIH LAMBAT)
+ -- Berlaku untuk RAID normal DAN ASC (struktur raidId sama)
  for _, ent in pairs(RAID_LIVE) do
   local entMapMatch = (ent.mapId == mapId)
   local entAscMatch = (isAscension and ent.isAscension) or (not isAscension and not ent.isAscension)
@@ -7980,12 +8074,15 @@ function GetBestGrade(mapNum, isAscension)
    if g and g ~= "?" then return g end
   end
  end
- -- 2. Chat cache (fallback)
- if _runeGradeCache then
-  if _runeGradeCache[cacheKey] then return _runeGradeCache[cacheKey] end
-  if isAscension and _runeGradeCache[mapNum] then return _runeGradeCache[mapNum] end
+
+ -- PRIORITAS 3: _runeGradeCache normal (untuk RAID Normal key positif)
+ if not isAscension and _runeGradeCache then
+  if _runeGradeCache[cacheKey] and _runeGradeCache[cacheKey] ~= "?" then
+   return _runeGradeCache[cacheKey]
+  end
  end
- -- 3. RAID_LIVE entry grade field
+
+ -- PRIORITAS 4: RAID_LIVE entry grade field (last resort)
  for _, ent in pairs(RAID_LIVE) do
   if ent.mapId == mapId and ent.grade and ent.grade ~= "?" then
    if isAscension and ent.isAscension then return ent.grade end
@@ -8025,32 +8122,7 @@ end
 local function _onRaidChildAdded(child, slotName)
  local mapNum = _parseRaidEnterName(child.Name)
  if not mapNum or mapNum < 1 or mapNum > 26 then return end -- Map 1-20 normal, 1-26 AT
-
- -- [FIX BUG #1] Deteksi AT via 3 sumber:
- -- 1. mapNum 21-26 pasti AT (range Tower)
- -- 2. _ASC_CHAT_CACHE[mapNum] sudah ada (TipsPanel tangkap notif AT duluan)
- -- 3. UpdateRaidInfo sudah buat entry dengan raidId >= 935001 untuk mapNum ini
- local _isAscEntry = (mapNum >= 21 and mapNum <= 26)
-  or (_ASC_CHAT_CACHE and _ASC_CHAT_CACHE[mapNum] ~= nil)
- -- Cek juga dari RAID_LIVE yang sudah ada (UpdateRaidInfo bisa datang duluan)
- if not _isAscEntry then
-  for _, _ent in pairs(RAID_LIVE) do
-   local _ridAbs = _ent.raidId and ((_ent.raidId < 0 and math.abs(_ent.raidId)) or _ent.raidId) or 0
-   if _ridAbs >= 935001 then
-    local _entMn = _ent.mapId and (
-     (_ent.mapId >= 50301 and _ent.mapId <= 50326 and (_ent.mapId - 50300))
-     or (_ent.mapId >= 50001 and _ent.mapId <= 50026 and (_ent.mapId - 50000))
-     or nil
-    )
-    if _entMn == mapNum then _isAscEntry = true; break end
-   end
-  end
- end
-
- -- [FIX BUG #1] mapId yang benar:
- -- AT: 50300 + mapNum (50301-50326), RAID normal: 50000 + mapNum (50001-50020)
- local mapId = _isAscEntry and (50300 + mapNum) or (50000 + mapNum)
-
+ local mapId = 50000 + mapNum
  -- Cek sudah ada entry raidId asli untuk map ini
  for _, ent in pairs(RAID_LIVE) do
  if ent.mapId == mapId and not ent._tempEntry then return end
@@ -8059,21 +8131,13 @@ local function _onRaidChildAdded(child, slotName)
  local tempKey = -(mapId)
  -- [FIX] Preserve isAscension & bossName jika chat parser sudah buat entry Ascension di key ini
  -- Chat notif bisa datang SEBELUM workspace event, jangan timpa flag isAscension-nya
- local _prevIsAsc = _isAscEntry -- langsung set dari deteksi di atas
+ local _prevIsAsc = false
  local _prevBossName = nil
  local _prevGrade = "?"
- -- Coba ambil grade dari _ASC_CHAT_CACHE (TipsPanel sudah parse duluan)
- if _isAscEntry and _ASC_CHAT_CACHE and _ASC_CHAT_CACHE[mapNum] then
-  _prevGrade = _ASC_CHAT_CACHE[mapNum].grade or "?"
-  _prevBossName = _ASC_CHAT_CACHE[mapNum].bossName or nil
- end
- -- Atau dari RAID_LIVE entry lama (jika sudah ada)
- if RAID_LIVE[tempKey] then
-  if RAID_LIVE[tempKey].isAscension then _prevIsAsc = true end
-  if RAID_LIVE[tempKey].bossName then _prevBossName = RAID_LIVE[tempKey].bossName end
-  if RAID_LIVE[tempKey].grade and RAID_LIVE[tempKey].grade ~= "?" then
-   _prevGrade = RAID_LIVE[tempKey].grade
-  end
+ if RAID_LIVE[tempKey] and RAID_LIVE[tempKey].isAscension then
+  _prevIsAsc = true
+  _prevBossName = RAID_LIVE[tempKey].bossName
+  _prevGrade = RAID_LIVE[tempKey].grade or "?"
  end
  local _mn = mapNum
  RAID_LIVE[tempKey] = {
@@ -8107,14 +8171,12 @@ end
 local function _onRaidChildRemoved(child)
  local mapNum = _parseRaidEnterName(child.Name)
  if not mapNum then return end
- -- [FIX BUG #1] Hapus entry berdasarkan mapNum - cocokkan AT (50300+N) DAN RAID (50000+N)
- local mapIdNormal = 50000 + mapNum
- local mapIdAsc    = 50300 + mapNum
+ local mapId = 50000 + mapNum
  local changed = false
  for rid, ent in pairs(RAID_LIVE) do
-  if ent.mapId == mapIdNormal or ent.mapId == mapIdAsc then
-   RAID_LIVE[rid] = nil; changed = true
-  end
+ if ent.mapId == mapId then
+ RAID_LIVE[rid] = nil; changed = true
+ end
  end
  if changed then RebuildRaidList() end
 end
@@ -8342,39 +8404,7 @@ ConnectRaidListeners = function()
  RebuildRaidList()
  -- [v58] Gunakan debounce terpusat
  if TriggerEntryWakeup then TriggerEntryWakeup() end
- -- [FIX BUG #2] Kirim teks mentah webhook dari UpdateRaidInfo
- -- Ini sumber grade paling akurat (formula raidId), harus masuk ke Discord
- if _WH and _WH.AddLine and not _whSilent then
-  for k2, info2 in pairs(raidInfos) do
-   if type(info2) == "table" then
-    local _rid2   = info2.raidId or (type(k2)=="number" and k2) or tonumber(k2)
-    local _mid2   = info2.mapId
-    if _rid2 and _mid2 then
-     -- Normalize mapId
-     if _mid2 >= 50101 and _mid2 <= 50120 then _mid2 = _mid2 - 100 end
-     local _isA2   = (_rid2 >= 935001) or (_mid2 >= 50301 and _mid2 <= 50326)
-     local _mn2    = _isA2 and (_mid2 - 50300) or (_mid2 - 50000)
-     -- Ambil grade dari RAID_LIVE yang sudah diupdate
-     local _ent2   = RAID_LIVE[_rid2]
-     local _gr2    = (_ent2 and _ent2.grade and _ent2.grade ~= "?") and _ent2.grade
-      or (RAID_CONFIG_GRADE and RAID_CONFIG_GRADE[_rid2]) or "?"
-     -- Bangun teks mentah persis format sniffer
-     local _txt2
-     if _isA2 then
-      local _bn2 = _ent2 and _ent2.bossName
-      _txt2 = "The MaFissure appeared in Ascension Tower ".._mn2
-       ..(_bn2 and (" - "..(_bn2:gsub("^%l",string.upper))) or "")
-       .." [".._gr2.."]"
-     else
-      local _mapNm2 = MAP_NAMES and MAP_NAMES[_mn2] or ("Map ".._mn2)
-      _txt2 = "The MaFissure appeared in ".._mn2..","
-       .._mapNm2.." [".._gr2.."]"
-     end
-     _WH.AddLine(_txt2)
-    end
-   end
-  end
- end
+ TriggerWebhookDebounce()
  end
  end)
  table.insert(_WH.raidConns, conn)
@@ -8613,9 +8643,24 @@ function StartAscensionLoop()
 
   local pm = ASC.pickMode or "easy"
 
-  -- Helper: ambil grade entry
+  -- Helper: ambil grade entry (Ascension)
+  -- [FIX v272] Urutan: GetBestGrade (sudah include _ASC_CHAT_CACHE) -> _ASC_CHAT_CACHE langsung
+  -- -> _runeGradeCache[-mapNum] -> r.grade
+  -- Ini memastikan grade terbaca meski UpdateRaidInfo dari server belum datang
   local function _getGrade(r)
-   return GetBestGrade(r.mapNum, true) or r.grade
+   local g = GetBestGrade(r.mapNum, true)
+   if g and g ~= "?" then return g end
+   -- Fallback langsung ke _ASC_CHAT_CACHE (paling reliabel untuk AT)
+   if _ASC_CHAT_CACHE then
+    local _ce = _ASC_CHAT_CACHE[r.mapNum]
+    if _ce and _ce.grade and _ce.grade ~= "?" then return _ce.grade end
+   end
+   -- Fallback ke _runeGradeCache key negatif
+   if _runeGradeCache then
+    local _cg = _runeGradeCache[-(r.mapNum)]
+    if _cg and _cg ~= "?" then return _cg end
+   end
+   return r.grade
   end
 
   -- Helper sort highest rank
