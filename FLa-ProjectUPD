@@ -8455,23 +8455,17 @@ local function GetAscensionList()
    -- ASC mapId 50301-50326 -> mapNum 1-26; RAID mapId 50001-50020 -> mapNum 1-20
    local _mId = ent.mapId or 50000
    local mn = (_mId >= 50301 and _mId <= 50326) and (_mId - 50300) or (_mId - 50000)
-   -- [manual] filter grade jika pickMode manual & ada grade dipilih
-   local gradeOk = true
-   if ASC.pickMode == "manual" and next(ASC.runeGrades) then
-    local g = ent.grade or "?"
-    gradeOk = ASC.runeGrades[g] == true
-   end
-   if gradeOk then
-    table.insert(list, {
-     id      = resolvedId,
-     rawId   = rid,
-     mapId   = ent.mapId,
-     mapNum  = mn,
-     grade   = ent.grade or "?",
-     bossName= ent.bossName,
-     isAscension = true,
-    })
-   end
+   -- [FIX] Tidak ada filter grade di sini - semua filtering (Preferred Rank/Map + fallback)
+   -- ditangani sepenuhnya oleh ResolveAscEntry() agar fallback ke Tower terkecil bisa berjalan
+   table.insert(list, {
+    id      = resolvedId,
+    rawId   = rid,
+    mapId   = ent.mapId,
+    mapNum  = mn,
+    grade   = ent.grade or "?",
+    bossName= ent.bossName,
+    isAscension = true,
+   })
   end
  end
  return list
@@ -8506,14 +8500,14 @@ function StartAscensionLoop()
 
  AscStatusUpdate("Siap. Menunggu Ascension Tower...", Color3.fromRGB(180,180,60))
 
- -- [v48] ResolveAscEntry: Pick Mode logic sama persis dengan AUTO RAID
- -- Mode: easy, hard, manual (dengan preferMaps, runeGrades)
+ -- ResolveAscEntry: Pick Mode logic IDENTIK dengan AUTO RAID
+ -- Semua mode locked kecuali Manual -> hanya masuk Tower terkecil
+ -- Manual: PREFERRED MAP + PREFERRED RANK aktif, fallback ke terkecil jika tidak match
  local function ResolveAscEntry()
   local ascList = GetAscensionList()
   if #ascList == 0 then return nil end
 
   local pm = ASC.pickMode or "easy"
-  local hasPick = (pm == "byrank" or pm == "manual") and next(ASC.runeGrades) ~= nil
 
   -- Helper: ambil grade entry
   local function _getGrade(r)
@@ -8530,23 +8524,35 @@ function StartAscensionLoop()
    end)
   end
 
-  -- [v48] MANUAL MODE - sama persis dengan AUTO RAID
+  -- Helper: ambil Tower terkecil dari list
+  local function pickLowest(list)
+   table.sort(list, function(a,b) return a.mapNum < b.mapNum end)
+   return list[1]
+  end
+
+  -- [MANUAL MODE] - PREFERRED MAP + PREFERRED RANK aktif
+  -- Sama persis dengan AUTO RAID manual mode
   if pm == "manual" then
    ASC.manualMatchMode = "none"
    local valid = {}
    local hasPreferMaps = next(ASC.preferMaps or {}) ~= nil
 
+   -- GERBANG: filter by Preferred Map (jika ada)
    for _, r in ipairs(ascList) do
     local mn = r.mapNum
     if not hasPreferMaps or (ASC.preferMaps and ASC.preferMaps[mn]) then
      table.insert(valid, r)
     end
    end
-   if #valid == 0 then return nil end
+   -- Jika Preferred Map di-set tapi tidak ada yang lolos filter -> fallback ke semua tower
+   if #valid == 0 then
+    valid = ascList
+   end
 
    -- TAHAP 1: Match Preferred Rank
    local matched = {}
-   if next(ASC.runeGrades or {}) ~= nil then
+   local hasPreferRank = next(ASC.runeGrades or {}) ~= nil
+   if hasPreferRank then
     for _, r in ipairs(valid) do
      if ASC.runeGrades[_getGrade(r)] then
       table.insert(matched, r)
@@ -8559,29 +8565,34 @@ function StartAscensionLoop()
     return matched[1]
    end
 
-   -- TAHAP 2: Fallback - mapNum terendah
+   -- TAHAP 2: Fallback - jangan nganggur, masuk Tower terkecil dari valid
    ASC.manualMatchMode = "fallback"
-   table.sort(valid, function(a,b) return a.mapNum < b.mapNum end)
-   return valid[1]
+   return pickLowest(valid)
   end
 
-  -- [v48] BYRANK MODE
+  -- [BYRANK MODE] - Filter by Preferred Rank, fallback ke terkecil jika tidak match
   if pm == "byrank" then
-   if not hasPick then return nil end
-   local matched2 = {}
-   for _, r in ipairs(ascList) do
-    if ASC.runeGrades[_getGrade(r)] then
-     table.insert(matched2, r)
+   local hasPreferRank = next(ASC.runeGrades or {}) ~= nil
+   if hasPreferRank then
+    local matched2 = {}
+    for _, r in ipairs(ascList) do
+     if ASC.runeGrades[_getGrade(r)] then
+      table.insert(matched2, r)
+     end
+    end
+    if #matched2 > 0 then
+     sortHighestRank(matched2)
+     return matched2[1]
     end
    end
-   if #matched2 == 0 then return nil end
-   sortHighestRank(matched2)
-   return matched2[1]
+   -- Rank tidak match / tidak di-set -> fallback ke Tower terkecil
+   return pickLowest(ascList)
   end
 
-  -- [v48] BYMAP MODE
+  -- [BYMAP MODE] - Filter by Preferred Map, fallback ke terkecil jika tidak match
   if pm == "bymap" then
-   if next(ASC.preferMaps or {}) ~= nil then
+   local hasPreferMaps = next(ASC.preferMaps or {}) ~= nil
+   if hasPreferMaps then
     local mapMatched = {}
     for _, r in ipairs(ascList) do
      if ASC.preferMaps and ASC.preferMaps[r.mapNum] then
@@ -8589,22 +8600,21 @@ function StartAscensionLoop()
      end
     end
     if #mapMatched > 0 then
-     table.sort(mapMatched, function(a,b) return a.mapNum < b.mapNum end)
-     return mapMatched[1]
+     return pickLowest(mapMatched)
     end
-    return nil
    end
+   -- Map tidak match / tidak di-set -> fallback ke Tower terkecil
+   return pickLowest(ascList)
   end
 
-  -- [v48] DEFAULT: Round-robin map 1-8 (tower terendah)
+  -- [DEFAULT MODE] - Round-robin Tower 1-8, fallback ke terkecil
   if pm == "default" then
    local low = {}
    for _, r in ipairs(ascList) do
     if r.mapNum >= 1 and r.mapNum <= 8 then table.insert(low, r) end
    end
    if #low == 0 then
-    table.sort(ascList, function(a,b) return a.mapNum < b.mapNum end)
-    return ascList[1]
+    return pickLowest(ascList)
    end
    table.sort(low, function(a,b) return a.mapNum < b.mapNum end)
    ASC._rrIdx = (ASC._rrIdx or 0) + 1
@@ -8612,43 +8622,19 @@ function StartAscensionLoop()
    return low[ASC._rrIdx]
   end
 
-  -- EASY: Preferred Rank dulu (jika ada), lalu mapNum terendah sebagai fallback
+  -- [EASY MODE] - Selalu Tower terkecil
   if pm == "easy" then
-   if next(ASC.runeGrades or {}) ~= nil then
-    local matched = {}
-    for _, r in ipairs(ascList) do
-     if ASC.runeGrades[_getGrade(r)] then table.insert(matched, r) end
-    end
-    if #matched > 0 then
-     table.sort(matched, function(a,b) return a.mapNum < b.mapNum end)
-     return matched[1]
-    end
-   end
-   -- Fallback: tidak ada match Preferred Rank, ambil mapNum terendah
-   table.sort(ascList, function(a,b) return a.mapNum < b.mapNum end)
-   return ascList[1]
+   return pickLowest(ascList)
   end
 
-  -- HARD: Preferred Rank dulu (jika ada), lalu mapNum tertinggi sebagai fallback
+  -- [HARD MODE] - Selalu Tower terbesar
   if pm == "hard" then
-   if next(ASC.runeGrades or {}) ~= nil then
-    local matched = {}
-    for _, r in ipairs(ascList) do
-     if ASC.runeGrades[_getGrade(r)] then table.insert(matched, r) end
-    end
-    if #matched > 0 then
-     table.sort(matched, function(a,b) return a.mapNum > b.mapNum end)
-     return matched[1]
-    end
-   end
-   -- Fallback: tidak ada match Preferred Rank, ambil mapNum tertinggi
    table.sort(ascList, function(a,b) return a.mapNum > b.mapNum end)
    return ascList[1]
   end
 
   -- Fallback ultimate
-  table.sort(ascList, function(a,b) return a.mapNum < b.mapNum end)
-  return ascList[1]
+  return pickLowest(ascList)
  end
 
  ASC.thread = task.spawn(function()
@@ -8708,19 +8694,40 @@ function StartAscensionLoop()
       else
        AscStatusUpdate("Waiting Ascension Tower [".._pm.."]...", Color3.fromRGB(140,140,60))
       end
-     elseif next(ASC.runeGrades or {}) ~= nil and ASC.runeEnabled and ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 then
-      -- Preferred Rank aktif + Preferred Rune aktif
+     elseif _pm == "manual" then
+      -- Manual mode: tampilkan filter aktif
+      local _parts = {}
+      local _hasMap = next(ASC.preferMaps or {}) ~= nil
+      local _hasRank = next(ASC.runeGrades or {}) ~= nil
+      if _hasMap then
+       local _ms = {}
+       for mn=1,26 do if ASC.preferMaps and ASC.preferMaps[mn] then table.insert(_ms,"T"..mn) end end
+       table.insert(_parts, "Map["..table.concat(_ms,"|").."]")
+      end
+      if _hasRank then
+       local _gr = {}
+       for _, g in ipairs(GRADE_LIST) do if ASC.runeGrades[g] then table.insert(_gr, g) end end
+       table.insert(_parts, "Rank["..table.concat(_gr,"||").."]")
+      end
+      if _hasRank and ASC.runeEnabled and ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 then
+       table.insert(_parts, "Rune->T"..ASC.runeMapTarget)
+      end
+      local _filterStr = #_parts > 0 and table.concat(_parts," | ") or "no filter"
+      AscStatusUpdate("Waiting [Manual] "..(_filterStr).."...", Color3.fromRGB(255,180,50))
+     elseif _pm == "bymap" then
+      local _ms = {}
+      for mn=1,26 do if ASC.preferMaps and ASC.preferMaps[mn] then table.insert(_ms,"T"..mn) end end
+      local _mapStr = #_ms > 0 and table.concat(_ms,"|") or "NOT SET"
+      AscStatusUpdate("Waiting [ByMap] "..(_mapStr).." (fallback: terkecil)...", Color3.fromRGB(100,200,100))
+     elseif _pm == "byrank" then
       local _gr = {}
       for _, g in ipairs(GRADE_LIST) do if ASC.runeGrades[g] then table.insert(_gr, g) end end
-      AscStatusUpdate("Waiting Rank ["..table.concat(_gr,"||").."]->override Tower "..ASC.runeMapTarget.." [".._pm.."]...", Color3.fromRGB(200,140,255))
-     elseif next(ASC.runeGrades or {}) ~= nil then
-      -- Preferred Rank aktif saja
-      local _gr2 = {}
-      for _, g in ipairs(GRADE_LIST) do if ASC.runeGrades[g] then table.insert(_gr2, g) end end
-      AscStatusUpdate("Waiting Rank ["..table.concat(_gr2,"||").."]-> [".._pm.."]...", Color3.fromRGB(200,255,150))
-     elseif ASC.runeEnabled and ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 then
-      -- Preferred Rune aktif saja (tanpa Preferred Rank)
-      AscStatusUpdate("Waiting Tower apapun -> override Tower "..ASC.runeMapTarget.." [".._pm.."]...", Color3.fromRGB(147,197,253))
+      local _rankStr = #_gr > 0 and table.concat(_gr,"||") or "NOT SET"
+      AscStatusUpdate("Waiting [ByRank] "..(_rankStr).." (fallback: terkecil)...", Color3.fromRGB(200,120,255))
+     elseif _pm == "hard" then
+      AscStatusUpdate("Waiting Ascension Tower [Hard - Tower Terbesar]...", Color3.fromRGB(255,80,80))
+     elseif _pm == "easy" then
+      AscStatusUpdate("Waiting Ascension Tower [Easy - Tower Terkecil]...", Color3.fromRGB(80,220,80))
      else
       AscStatusUpdate("Waiting Ascension Tower [".._pm.."]...", Color3.fromRGB(255,200,60))
      end
@@ -8800,14 +8807,19 @@ function StartAscensionLoop()
     -- Entry ASC = identik RAID normal, beda hanya mapId dan RUNE_IDS:
     -- RAID: StartChallengeRaidMap({mapId = raidEntry.mapId + 100}) → 50101-50120
     -- ASC : StartChallengeRaidMap({mapId = 50300+mn})              → Tower X = 50301-50326
-    -- Pakai ResolveAscTargetMapId(mn) agar selalu 50300+mn
-
-    -- [PREFERRED MAP] Override targetMapId jika user memilih Tower tertentu
-    local _prefMap = ASC.preferMapTarget or 0
-    local targetMapId = (_prefMap >= 1 and _prefMap <= 26)
-        and ResolveAscTargetMapId(_prefMap)   -- 50300 + preferMapTarget
-        or  ResolveAscTargetMapId(mn)         -- default: 50300 + mn (dari event)
-    local mn_label = (_prefMap >= 1 and _prefMap <= 26) and (_prefMap.." [Pref]") or mn
+    -- mapNum sudah di-resolve oleh ResolveAscEntry (termasuk Preferred Map / Rank filter + fallback)
+    local targetMapId = ResolveAscTargetMapId(mn)
+    local _pm_now = ASC.pickMode or "easy"
+    local mn_label = mn
+    if _pm_now == "manual" and ASC.manualMatchMode == "primary" then
+     mn_label = mn.." [Match]"
+    elseif _pm_now == "manual" and ASC.manualMatchMode == "fallback" then
+     mn_label = mn.." [Fallback]"
+    elseif _pm_now == "bymap" then
+     mn_label = mn.." [ByMap]"
+    elseif _pm_now == "byrank" then
+     mn_label = mn.." [ByRank]"
+    end
 
     AscStatusUpdate("[~] Enter Tower "..mn_label.."...", Color3.fromRGB(100,200,255))
 
@@ -12309,17 +12321,22 @@ do
   [25]="Goku Super 4", [26]="Goku Super 4+1",
  }
 
- -- Sync tampilan awal
- if ASC.preferMapTarget >= 1 and ASC.preferMapTarget <= 26 then
-  local _ptn = ASC_PREFMAP_NAMES[ASC.preferMapTarget] or ("Tower "..ASC.preferMapTarget)
-  ascPrefMapDDVal.Text = " Tower "..ASC.preferMapTarget.." - ".._ptn
-  ascPrefMapDDVal.TextColor3 = Color3.fromRGB(100,220,255)
+ -- Sync tampilan awal dari ASC.preferMaps
+ local function UpdateAscPrefMapLabel()
+  local ms = {}
+  for mn=1,26 do if ASC.preferMaps and ASC.preferMaps[mn] then table.insert(ms,"T"..mn) end end
+  if #ms == 0 then
+   ascPrefMapDDVal.Text = " -- NOT SELECTED --"; ascPrefMapDDVal.TextColor3 = C.TXT3
+  else
+   ascPrefMapDDVal.Text = " "..table.concat(ms," | "); ascPrefMapDDVal.TextColor3 = Color3.fromRGB(100,220,255)
+  end
  end
+ UpdateAscPrefMapLabel()
 
  ascPrefMapDDBtn.MouseButton1Click:Connect(function()
   CloseActiveDD()
   local aP=ascPrefMapDDBtn.AbsolutePosition; local aS=ascPrefMapDDBtn.AbsoluteSize; local IH=28
-  local popH=(27*(IH+2)+8); local cam=workspace.CurrentCamera
+  local popH=(28*(IH+2)+44); local cam=workspace.CurrentCamera
   local vpH=cam and cam.ViewportSize.Y or 800
   local goUp=(aP.Y+popH > vpH*0.85)
   local popup=Instance.new("Frame")
@@ -12330,40 +12347,54 @@ do
   popup.ZIndex=9999; popup.ClipsDescendants=true; Corner(popup,10); Stroke(popup,C.BORD2,1.5,0.2)
   local sf=Instance.new("ScrollingFrame",popup); sf.Size=UDim2.new(1,0,1,0)
   sf.BackgroundTransparency=1; sf.BorderSizePixel=0; sf.ScrollBarThickness=4; sf.ScrollBarImageColor3=Color3.fromRGB(100,220,255)
-  sf.ZIndex=9999; sf.CanvasSize=UDim2.new(0,0,0,27*(IH+2)+8)
+  sf.ZIndex=9999; sf.CanvasSize=UDim2.new(0,0,0,28*(IH+2)+44)
   local sfl=Instance.new("UIListLayout",sf); sfl.Padding=UDim.new(0,2); sfl.SortOrder=Enum.SortOrder.LayoutOrder
   Instance.new("UIPadding",sf).PaddingTop=UDim.new(0,4)
-  -- NOT SELECTED
-  local i0=Instance.new("TextButton",sf); i0.Size=UDim2.new(1,-8,0,IH); i0.LayoutOrder=0
-  local s0=(ASC.preferMapTarget==0)
-  i0.BackgroundColor3=s0 and C.SURFACE or C.DD_BG; i0.BackgroundTransparency=s0 and 0.18 or 0.42
-  i0.BorderSizePixel=0; i0.Text=""; i0.AutoButtonColor=false; i0.ZIndex=9999
-  Instance.new("UICorner",i0).CornerRadius=UDim.new(0,6)
-  local l0=Instance.new("TextLabel",i0); l0.Size=UDim2.new(1,-8,1,0); l0.Position=UDim2.new(0,8,0,0)
-  l0.BackgroundTransparency=1; l0.Text="-- NOT SELECTED --"; l0.TextSize=10
-  l0.Font=Enum.Font.GothamBold; l0.TextColor3=s0 and Color3.fromRGB(100,220,255) or C.TXT3
-  l0.TextXAlignment=Enum.TextXAlignment.Left; l0.ZIndex=9999
-  i0.MouseButton1Click:Connect(function()
-   CloseActiveDD(); ASC.preferMapTarget=0
-   ascPrefMapDDVal.Text=" -- NOT SELECTED --"; ascPrefMapDDVal.TextColor3=C.TXT3
+
+  -- Tombol Reset ALL
+  local rb=Instance.new("TextButton",sf); rb.Size=UDim2.new(1,-8,0,IH); rb.LayoutOrder=0
+  rb.BackgroundColor3=C.RED; rb.BackgroundTransparency=0.55; rb.BorderSizePixel=0; rb.Text=""; rb.AutoButtonColor=false; rb.ZIndex=9999
+  Instance.new("UICorner",rb).CornerRadius=UDim.new(0,6)
+  local rl=Instance.new("TextLabel",rb); rl.Size=UDim2.new(1,-8,1,0); rl.Position=UDim2.new(0,8,0,0)
+  rl.BackgroundTransparency=1; rl.Text="x Reset ALL"; rl.TextSize=10
+  rl.Font=Enum.Font.GothamBold; rl.TextColor3=C.RED; rl.TextXAlignment=Enum.TextXAlignment.Left; rl.ZIndex=9999
+  rb.MouseButton1Click:Connect(function()
+   for mn=1,26 do ASC.preferMaps[mn]=nil end
+   CloseActiveDD(); UpdateAscPrefMapLabel()
   end)
-  -- Tower 1-26
+
+  -- Tower 1-26 dengan multi-select (checkmark)
+  local itemBtns = {}
   for mn=1,26 do
    local ml=mn; local bossName=ASC_PREFMAP_NAMES[mn] or ("Tower "..mn)
    local it=Instance.new("TextButton",sf); it.Size=UDim2.new(1,-8,0,IH); it.LayoutOrder=mn
-   local iS=(ASC.preferMapTarget==mn)
+   local iS=(ASC.preferMaps and ASC.preferMaps[mn]==true)
    it.BackgroundColor3=iS and C.SURFACE or C.DD_BG; it.BackgroundTransparency=iS and 0.18 or 0.42
    it.BorderSizePixel=0; it.Text=""; it.AutoButtonColor=false; it.ZIndex=9999
    Instance.new("UICorner",it).CornerRadius=UDim.new(0,6)
-   local il=Instance.new("TextLabel",it); il.Size=UDim2.new(1,-8,1,0); il.Position=UDim2.new(0,8,0,0)
+   local ck=Instance.new("TextLabel",it); ck.Size=UDim2.new(0,20,1,0); ck.Position=UDim2.new(0,4,0,0)
+   ck.BackgroundTransparency=1; ck.Text=iS and "v" or ""; ck.TextSize=11
+   ck.Font=Enum.Font.GothamBold; ck.TextColor3=Color3.fromRGB(100,220,255)
+   ck.TextXAlignment=Enum.TextXAlignment.Center; ck.ZIndex=9999
+   local il=Instance.new("TextLabel",it); il.Size=UDim2.new(1,-28,1,0); il.Position=UDim2.new(0,26,0,0)
    il.BackgroundTransparency=1
    il.Text="Tower "..mn.." - "..bossName; il.TextSize=10; il.Font=Enum.Font.GothamBold
    il.TextColor3=iS and Color3.fromRGB(100,220,255) or C.TXT
    il.TextXAlignment=Enum.TextXAlignment.Left; il.ZIndex=9999; il.TextTruncate=Enum.TextTruncate.AtEnd
+   itemBtns[ml] = {btn=it, ck=ck, lbl=il}
    it.MouseButton1Click:Connect(function()
-    CloseActiveDD(); ASC.preferMapTarget=ml
-    local _bn2=ASC_PREFMAP_NAMES[ml] or ("Tower "..ml)
-    ascPrefMapDDVal.Text=" Tower "..ml.." - ".._bn2; ascPrefMapDDVal.TextColor3=Color3.fromRGB(100,220,255)
+    -- Toggle pilihan (multi-select)
+    if ASC.preferMaps[ml] then
+     ASC.preferMaps[ml] = nil
+    else
+     ASC.preferMaps[ml] = true
+    end
+    local nowSel = (ASC.preferMaps[ml] == true)
+    it.BackgroundTransparency = nowSel and 0.18 or 0.42
+    it.BackgroundColor3 = nowSel and C.SURFACE or C.DD_BG
+    ck.Text = nowSel and "v" or ""
+    il.TextColor3 = nowSel and Color3.fromRGB(100,220,255) or C.TXT
+    UpdateAscPrefMapLabel()
    end)
   end
   DDLayer.Visible=true
@@ -12446,22 +12477,42 @@ do
  end)
 
  -- ============================================================
- -- ROW 12-13: PICK MODE (Easy / Hard / Manual)
+ -- ROW 12-13: PICK MODE (sama persis dengan AUTO RAID)
  -- ============================================================
- local APM_OPTS  = {"Easy","Hard","Manual"}
- local APM_KEYS  = {"easy","hard","manual"}
+ local APM_OPTS  = {"Default","By Rank","By Map","Hard","Easy","Manual"}
+ local APM_KEYS  = {"default","byrank","bymap","hard","easy","manual"}
  local APM_COLORS= {
-  Color3.fromRGB(80,220,80),   -- Easy: hijau
+  Color3.fromRGB(148,195,255), -- Default: biru es
+  Color3.fromRGB(200,120,255), -- By Rank: ungu
+  Color3.fromRGB(100,200,100), -- By Map: hijau
   Color3.fromRGB(255,80,80),   -- Hard: merah
+  Color3.fromRGB(80,220,80),   -- Easy: hijau muda
   Color3.fromRGB(255,180,50),  -- Manual: kuning
  }
  local APM_DESC  = {
-  ".",
-  ".",
-  ".",
+  "Join Tower apapun tanpa filter",
+  "Filter by Preferred Rank",
+  "Filter by Preferred Map",
+  "Selalu pilih Tower terbesar",
+  "Selalu pilih Tower terkecil",
+  "Setting manual: Map, Rank, Rune",
  }
- local curAPM = 1
+ -- Unlock rule per mode (sama persis RAID):
+ -- mapUnlock  : bymap, manual
+ -- rankUnlock : byrank, manual
+ -- runeUnlock : manual
+ local APM_UNLOCK = {
+  default = {map=false, rank=false, rune=false},
+  byrank  = {map=false, rank=true,  rune=false},
+  bymap   = {map=true,  rank=false, rune=false},
+  hard    = {map=false, rank=false, rune=false},
+  easy    = {map=false, rank=false, rune=false},
+  manual  = {map=true,  rank=true,  rune=true},
+ }
+ local curAPM = 5  -- default: "easy"
  ASC.pickMode = APM_KEYS[curAPM]
+
+ local ApplyAscPickModeLock -- forward declare
 
  local apmHdr = Label(ascInner,"PICK MODE",10,C.TXT3,Enum.Font.GothamBold)
  apmHdr.LayoutOrder = 12; apmHdr.Size = UDim2.new(1,0,0,14)
@@ -12507,6 +12558,7 @@ do
     curAPM = ii; ASC.pickMode = APM_KEYS[ii]
     apmDDLbl.Text = " "..APM_OPTS[ii]; apmDDLbl.TextColor3 = APM_COLORS[ii]
     apmDescLbl.Text = APM_DESC[ii]
+    ApplyAscPickModeLock()
     task.defer(ResizeAscBody)
    end)
   end
@@ -12514,7 +12566,72 @@ do
   _activeDDClose = function() popup:Destroy(); DDLayer.Visible=false end
  end)
 
+ -- ============================================================
+ --  APPLY ASC PICK MODE LOCK (sama persis dengan AUTO RAID)
+ -- ============================================================
+ local _ascPrefLocked  = false
+ local _ascRankLocked  = false
+ local _ascRuneLocked  = false
 
+ local function SetAscFieldLock(card, lockLbl, keyLbl, ddBtn, locked)
+  card.BackgroundTransparency = locked and 0.65 or 0.42
+  if lockLbl then lockLbl.Visible = locked end
+  if keyLbl  then keyLbl.TextColor3 = locked and C.TXT3 or C.TXT2 end
+  if ddBtn   then
+   ddBtn.BackgroundTransparency = locked and 0.72 or 0.25
+   for _,ch in ipairs(ddBtn:GetDescendants()) do
+    if ch:IsA("TextLabel") then ch.TextTransparency = locked and 0.5 or 0 end
+   end
+  end
+ end
+
+ -- Label gembok (dibuat di sini, setelah semua card sudah ada)
+ local _ascPrefMapLockLbl = Instance.new("TextLabel", ascPrefMapCard)
+ _ascPrefMapLockLbl.Size = UDim2.new(1,0,1,0); _ascPrefMapLockLbl.BackgroundTransparency = 1
+ _ascPrefMapLockLbl.Text = "🔒 Hanya aktif di Manual mode"; _ascPrefMapLockLbl.TextSize = 10
+ _ascPrefMapLockLbl.Font = Enum.Font.GothamBold; _ascPrefMapLockLbl.TextColor3 = C.TXT3
+ _ascPrefMapLockLbl.ZIndex = 5; _ascPrefMapLockLbl.Visible = false
+
+ local _ascRankLockLbl = Instance.new("TextLabel", ascRankCard)
+ _ascRankLockLbl.Size = UDim2.new(1,0,1,0); _ascRankLockLbl.BackgroundTransparency = 1
+ _ascRankLockLbl.Text = "🔒 Hanya aktif di Manual / By Rank"; _ascRankLockLbl.TextSize = 10
+ _ascRankLockLbl.Font = Enum.Font.GothamBold; _ascRankLockLbl.TextColor3 = C.TXT3
+ _ascRankLockLbl.ZIndex = 5; _ascRankLockLbl.Visible = false
+
+ local _ascRuneLockLbl = Instance.new("TextLabel", ascRuneCard)
+ _ascRuneLockLbl.Size = UDim2.new(1,0,1,0); _ascRuneLockLbl.BackgroundTransparency = 1
+ _ascRuneLockLbl.Text = "🔒 Hanya aktif di Manual mode"; _ascRuneLockLbl.TextSize = 10
+ _ascRuneLockLbl.Font = Enum.Font.GothamBold; _ascRuneLockLbl.TextColor3 = C.TXT3
+ _ascRuneLockLbl.ZIndex = 5; _ascRuneLockLbl.Visible = false
+
+ ApplyAscPickModeLock = function()
+  local pm     = ASC.pickMode
+  local unlock = APM_UNLOCK[pm] or {map=false, rank=false, rune=false}
+  _ascPrefLocked = not unlock.map
+  _ascRankLocked = not unlock.rank
+  _ascRuneLocked = not unlock.rune
+
+  SetAscFieldLock(ascPrefMapCard, _ascPrefMapLockLbl, ascPrefMapKeyL, ascPrefMapDDBtn, _ascPrefLocked)
+  SetAscFieldLock(ascRankCard,    _ascRankLockLbl,    ascRankKeyL,    ascRankDDBtn,    _ascRankLocked)
+  SetAscFieldLock(ascRuneCard,    _ascRuneLockLbl,    ascRuneKeyL,    ascRuneDDBtn,    _ascRuneLocked)
+
+  -- Clear data field yang terkunci (sama seperti RAID)
+  if _ascPrefLocked then
+   for mn=1,26 do ASC.preferMaps[mn]=nil end
+   if UpdateAscPrefMapLabel then UpdateAscPrefMapLabel() end
+  end
+  if _ascRankLocked then
+   for _,g in ipairs(GRADE_LIST or {}) do ASC.runeGrades[g] = nil end
+   RefreshAscRankLabel()
+  end
+  if _ascRuneLocked then
+   ASC.runeMapTarget = 0; ASC.runeEnabled = false
+   ascRuneDDVal.Text = " -- NOT SELECTED --"; ascRuneDDVal.TextColor3 = C.TXT3
+  end
+  task.defer(ResizeAscBody)
+ end
+
+ ApplyAscPickModeLock()
  task.defer(ResizeAscBody)
 end -- end Auto Ascension do block
 
