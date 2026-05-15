@@ -1181,6 +1181,10 @@ RAID = {
  updownDir = "up", -- "up" = UseRaidItem(10270) | "down" = UseRaidItem(10271)
  diffLbl = nil, -- label UI difficulty
  snapshotMapId = nil, -- mapId hasil jepretan sesuai difficulty saat ini
+ -- [RAID LIST ENTRY]
+ listEntries = {}, -- { {maps={[mn]=true,...}, ranks={[grade]=true,...}} , ... } urutan = prioritas bawah ke atas
+ listEnabled = false, -- toggle aktif/nonaktif fitur List Entry
+ _listVisitedMaps = {}, -- {[mapId]=true} tracking map yg sudah dimasuki di siklus event ini
 }
 _raidOn = false
 
@@ -4811,112 +4815,72 @@ do
  end)
 
  -- ============================================================
- -- 4. AUTO HIDE REWARD
- -- Sembunyikan popup reward (RewardsFrame, ResultFrame, dll)
- -- saat muncul. Toggle OFF restore semua ke state semula.
+ -- 4. AUTO HIDE REWARD (logic sama persis dengan HIDE_REWARD.lua)
  -- ============================================================
- local _hideRewardOn    = false
- local _rewardConn      = nil
- local _rewardAddConn   = nil
- local _rewardCache     = {}  -- [obj] = {visible=bool, pos=UDim2, enabled=bool}
-
- local HIDE_PANELS = {
-     "RewardsFrame","ResultFrame","RewardPanel","ChallengeGarrisonBossSuccess"
- }
-
- local function _isRewardPanel(obj)
-     for _, name in ipairs(HIDE_PANELS) do
-         if obj.Name == name or obj.Name:find("GarrisonBoss",1,true) then
-             return true
-         end
-     end
-     return false
- end
-
- local function _cacheAndHideReward(obj)
-     if not obj or not obj.Parent then return end
-     if _rewardCache[obj] then return end  -- sudah di-cache, skip
-     pcall(function()
-         if obj:IsA("ScreenGui") then
-             _rewardCache[obj] = {enabled = obj.Enabled}
-             obj.Enabled = false
-         elseif obj:IsA("GuiObject") then
-             _rewardCache[obj] = {visible = obj.Visible, pos = obj.Position}
-             obj.Visible  = false
-             obj.Position = UDim2.new(2, 0, 2, 0)
-         end
-     end)
- end
-
- local function _restoreAllReward()
-     for obj, state in pairs(_rewardCache) do
-         pcall(function()
-             if not obj or not obj.Parent then return end
-             if obj:IsA("ScreenGui") then
-                 obj.Enabled = state.enabled
-             elseif obj:IsA("GuiObject") then
-                 obj.Visible  = state.visible
-                 obj.Position = state.pos
-             end
-         end)
-     end
-     _rewardCache = {}
- end
+ local _hideRewardOn = false
 
  local function ApplyHideReward(on)
      _hideRewardOn = on
-
-     -- Putus koneksi lama
-     if _rewardConn    then _rewardConn:Disconnect();    _rewardConn    = nil end
-     if _rewardAddConn then _rewardAddConn:Disconnect(); _rewardAddConn = nil end
-
      if on then
-         -- Scan panel yang sudah ada
-         pcall(function()
-             for _, obj in ipairs(LP.PlayerGui:GetDescendants()) do
-                 if _isRewardPanel(obj) then _cacheAndHideReward(obj) end
-             end
-         end)
+         local HIDE_PANELS = {"RewardsFrame", "ResultFrame", "RewardPanel", "ChallengeGarrisonBossSuccess"}
 
-         -- Watch panel baru yang muncul
-         _rewardAddConn = LP.PlayerGui.ChildAdded:Connect(function(obj)
-             task.defer(function()
-                 if not _hideRewardOn then return end
-                 if _isRewardPanel(obj) then _cacheAndHideReward(obj) end
-                 -- Cek juga descendant baru di dalam obj
-                 for _, child in ipairs(obj:GetDescendants()) do
-                     if _isRewardPanel(child) then _cacheAndHideReward(child) end
+         local function forceHide(obj)
+             if not obj or not obj.Parent then return end
+             pcall(function()
+                 if obj:IsA("GuiObject") then
+                     obj.Visible = false
+                     obj.Position = UDim2.new(2, 0, 2, 0)
+                 elseif obj:IsA("ScreenGui") then
+                     obj.Enabled = false
                  end
              end)
-         end)
+         end
 
-         -- Ghost polling: pastikan panel yang muncul ulang tetap tersembunyi
+         local function checkAndHide(obj)
+             if not _hideRewardOn then return end
+             if not (obj:IsA("GuiObject") or obj:IsA("ScreenGui")) then return end
+             for _, name in ipairs(HIDE_PANELS) do
+                 if obj.Name == name or obj.Name:find("GarrisonBoss") then
+                     task.wait(0.1)
+                     if _hideRewardOn then forceHide(obj) end
+                     pcall(function()
+                         if obj:IsA("GuiObject") then
+                             obj:GetPropertyChangedSignal("Visible"):Connect(function()
+                                 if _hideRewardOn and obj.Visible then forceHide(obj) end
+                             end)
+                         elseif obj:IsA("ScreenGui") then
+                             obj:GetPropertyChangedSignal("Enabled"):Connect(function()
+                                 if _hideRewardOn and obj.Enabled then forceHide(obj) end
+                             end)
+                         end
+                     end)
+                     break
+                 end
+             end
+         end
+
+         -- Scan existing
+         for _, obj in ipairs(LP.PlayerGui:GetDescendants()) do checkAndHide(obj) end
+
+         -- Ghost polling
          task.spawn(function()
              while _hideRewardOn do
                  task.wait(0.5)
                  pcall(function()
                      for _, obj in ipairs(LP.PlayerGui:GetChildren()) do
-                         if _isRewardPanel(obj) then _cacheAndHideReward(obj) end
+                         for _, name in ipairs(HIDE_PANELS) do
+                             if obj.Name == name or obj.Name:find("GarrisonBoss") then
+                                 forceHide(obj)
+                             end
+                         end
                      end
                  end)
              end
          end)
-
-         -- Watch property change: kalau game paksa Visible/Enabled = true, hide lagi
-         _rewardConn = LP.PlayerGui.DescendantAdded:Connect(function(obj)
-             task.defer(function()
-                 if not _hideRewardOn then return end
-                 if _isRewardPanel(obj) then _cacheAndHideReward(obj) end
-             end)
-         end)
-
-     else
-         -- RESTORE PENUH ke state sebelum di-hide
-         _restoreAllReward()
      end
  end
 
- ToggleRow(p, "AUTO HIDE REWARD", "Sembunyikan popup reward. Toggle OFF restore penuh.", 4, function(on)
+ ToggleRow(p, "AUTO HIDE REWARD", "Sembunyikan popup reward.", 4, function(on)
      ApplyHideReward(on)
  end)
 
@@ -8079,6 +8043,29 @@ TriggerEntryWakeup = function()
         -- [v61 CYCLEFIX] Reset flag siklus lama
         _ascMatchedThisCycle = false
         _raidFallbackActive  = false
+        -- [RAID LIST ENTRY] Reset visited maps HANYA saat event benar-benar baru
+        -- Cek apakah sebelum wakeup ini RAID_LIVE sempat kosong (event lama habis)
+        -- Jika RAID_LIVE masih ada isi = update kecil di siklus yg sama, jangan reset
+        if RAID and RAID._listVisitedMaps then
+            local _liveCount = 0
+            for _ in pairs(RAID_LIVE) do _liveCount = _liveCount + 1 end
+            local _visitedCount = 0
+            for _ in pairs(RAID._listVisitedMaps) do _visitedCount = _visitedCount + 1 end
+            -- Reset hanya jika: tidak ada visited sama sekali (memang fresh start)
+            -- ATAU semua entry yang ada di visited sudah tidak ada di RAID_LIVE (event lama habis)
+            local _allExpired = true
+            if _visitedCount > 0 then
+                for mapId in pairs(RAID._listVisitedMaps) do
+                    for _, r in ipairs(RAID_ID_LIST) do
+                        if r.mapId == mapId then _allExpired = false; break end
+                    end
+                    if not _allExpired then break end
+                end
+            end
+            if _visitedCount == 0 or _allExpired then
+                for k in pairs(RAID._listVisitedMaps) do RAID._listVisitedMaps[k] = nil end
+            end
+        end
 
         -- ============================================================
         -- [v62 RINO/RINI FIX] "Si Pemanggil" memutuskan siapa yang dipanggil
@@ -8778,6 +8765,10 @@ function StopRaid()
  RAID_LIVE = {}
  _defaultRRIdx = 0 -- reset RR saat RAID habis
  RAID_ID_LIST = {}
+ -- [RAID LIST ENTRY] Reset tracking visited maps saat restart
+ if RAID._listVisitedMaps then
+  for k in pairs(RAID._listVisitedMaps) do RAID._listVisitedMaps[k] = nil end
+ end
  if _runeGradeCache then
   -- Reset semua cache grade saat sesi RAID baru dimulai (StopRaid dipanggil sebelum StartRaid)
   -- Ini memastikan batch notif lama tidak mencemari sesi baru
@@ -10449,8 +10440,108 @@ function StartRaidLoop()
         -- Prioritas: Rune Map + Pick Rank > Rune Map saja > Pick Rank > Difficulty
  -- Selalu baca RAID.runeEnabled / runeGrades / runeMapTarget live
  -- sehingga kalau user ganti setting di tengah, iterasi berikutnya langsung ikut
+
+-- ============================================================
+-- [RAID LIST ENTRY] ResolveEntryFromList
+-- Resolver independen: bypass manual mode, scan entry dari bawah ke atas.
+-- Return: raidEntry yang match, atau nil jika tidak ada yg match (caller fallback ke Easy)
+-- ============================================================
+local function ResolveEntryFromList()
+    if not RAID.listEnabled then return nil end
+    if #RAID.listEntries == 0 then return nil end
+    if #RAID_ID_LIST == 0 then return nil end
+
+    -- Filter Ascension keluar (sama seperti ResolveEntry)
+    local normalList = {}
+    for _, r in ipairs(RAID_ID_LIST) do
+        local isAsc = r.isAscension == true or (r.id and r.id >= 935001)
+        if not isAsc then
+            local live = r.id and RAID_LIVE[r.id]
+            if not (live and live.isAscension == true) then
+                table.insert(normalList, r)
+            end
+        end
+    end
+    if #normalList == 0 then return nil end
+
+    -- Helper ambil grade terbaik
+    local function _getGrade(r)
+        return GetBestGrade(r.mapId - 50000, false)
+    end
+
+    -- Kumpulkan semua lobby yang match dari semua entry sekaligus
+    local function collectAllMatched(skipVisited)
+        local allMatched = {}
+        local seen = {}
+        for i = 1, #RAID.listEntries do
+            local ent = RAID.listEntries[i]
+            local hasMaps  = next(ent.maps)  ~= nil
+            local hasRanks = next(ent.ranks) ~= nil
+            for _, r in ipairs(normalList) do
+                if seen[r.mapId] then continue end
+                -- Skip map yang sudah dikunjungi di siklus ini (kecuali sedang reset)
+                if skipVisited and RAID._listVisitedMaps[r.mapId] then continue end
+                local mn = r.mapId - 50000
+                local mapsOk = (not hasMaps) or ent.maps[mn]
+                if not mapsOk then continue end
+                if hasRanks then
+                    local grade = _getGrade(r)
+                    if grade and ent.ranks[grade] then
+                        table.insert(allMatched, r)
+                        seen[r.mapId] = true
+                    end
+                else
+                    table.insert(allMatched, r)
+                    seen[r.mapId] = true
+                end
+            end
+        end
+        return allMatched
+    end
+
+    -- Tahap 1: cari match yang belum dikunjungi
+    local allMatched = collectAllMatched(true)
+
+    -- Tahap 2: kalau semua sudah dikunjungi -> reset visited dan loop ulang dari awal
+    if #allMatched == 0 then
+        for k in pairs(RAID._listVisitedMaps) do RAID._listVisitedMaps[k] = nil end
+        allMatched = collectAllMatched(true)
+    end
+
+    if #allMatched == 0 then return nil end
+
+    -- Pilih mapId terkecil dari semua yang match
+    table.sort(allMatched, function(a, b) return a.mapId < b.mapId end)
+    return allMatched[1]
+end
+
 local function ResolveEntry()
                 if #RAID_ID_LIST == 0 then return nil end
+
+                -- [RAID LIST ENTRY] Cek List Entry dulu sebelum logika normal
+                if RAID.listEnabled and #RAID.listEntries > 0 then
+                    local listResult = ResolveEntryFromList()
+                    if listResult then
+                        return listResult
+                    end
+                    -- Tidak ada match -> fallback Easy (map terkecil dari normal list)
+                    local easyList = {}
+                    for _, r in ipairs(RAID_ID_LIST) do
+                        local isAsc = r.isAscension == true or (r.id and r.id >= 935001)
+                        if not isAsc then
+                            local live = r.id and RAID_LIVE[r.id]
+                            if not (live and live.isAscension == true) then
+                                table.insert(easyList, r)
+                            end
+                        end
+                    end
+                    if #easyList > 0 then
+                        table.sort(easyList, function(a, b) return a.mapId < b.mapId end)
+                        return easyList[1]
+                    end
+                    return nil
+                end
+
                 -- [v46] Auto Raid selalu filter Normal saja (Ascension ditangani Auto Ascension)
                 local function _ascFilter(entry)
                     if not entry then return false end
@@ -11508,6 +11599,10 @@ local function ResolveEntry()
  RAID.sukses = RAID.sukses + 1
  RaidCounterUpdate()
  RaidStatusUpdate("[OK] Succes-" .. RAID.sukses .. " Map " .. mn, Color3.fromRGB(100,255,150))
+ -- [RAID LIST ENTRY] Catat map ini sudah dikunjungi setelah sukses keluar
+ if RAID.listEnabled and RAID.raidMapId then
+  RAID._listVisitedMaps[RAID.raidMapId] = true
+ end
  end
  if not RAID.running then break end
 
@@ -11602,6 +11697,16 @@ local function ResolveEntry()
  task.wait(1)
  end
  RAID._cooldownActive = false -- [BUG FIX 3] Cooldown selesai, standby loop boleh masuk
+
+ -- [FIX BUG 2 LIST ENTRY] Buffer 2s tambahan setelah cooldown 14s
+ -- Mencegah "terlalu cepat masuk raid lagi" notif dari server
+ if RAID.listEnabled and #RAID.listEntries > 0 then
+  RaidStatusUpdate("[..] List Entry buffer 2s...", Color3.fromRGB(160,148,135))
+  for _bf = 2, 1, -1 do
+   if not RAID.running then break end
+   task.wait(1)
+  end
+ end
 
  -- [v247] STEP 7: Setelah cooldown selesai:
  -- 1. Jika SIEGE aktif/running -> tunggu SIEGE selesai total dulu (PRIORITAS atas MA)
@@ -12549,6 +12654,186 @@ do
 
  ApplyPickModeLock()
  task.defer(ResizeRaidBody)
+
+ -- ============================================================
+ -- [RAID LIST ENTRY] UI Section (LayoutOrder 18+)
+ -- ============================================================
+ do
+  -- Header label
+  local listHdr = Label(raidInner, "RAID LIST ENTRY", 10, C.TXT3, Enum.Font.GothamBold)
+  listHdr.LayoutOrder = 18; listHdr.Size = UDim2.new(1,0,0,14)
+
+  -- Card utama: toggle ON/OFF + tombol Save Entry
+  local listCtrlCard = Frame(raidInner, C.SURFACE, UDim2.new(1,0,0,40))
+  listCtrlCard.LayoutOrder = 19
+  Corner(listCtrlCard, 10); Stroke(listCtrlCard, C.BORD, 1.5, 0.3); Padding(listCtrlCard, 6, 6, 10, 10)
+
+  local listCtrlRow = Frame(listCtrlCard, C.BLACK, UDim2.new(1,0,1,0))
+  listCtrlRow.BackgroundTransparency = 1
+
+  -- Label toggle
+  local listTogLbl = Label(listCtrlRow, "List Entry", 12, C.TXT, Enum.Font.GothamBold)
+  listTogLbl.Size = UDim2.new(0,70,1,0)
+
+  -- Pill toggle ON/OFF
+  local listPill = Btn(listCtrlRow, RAID.listEnabled and C.PILL_ON or C.PILL_OFF, UDim2.new(0,48,0,26))
+  listPill.Position = UDim2.new(0,76,0.5,-13); Corner(listPill, 12)
+  local listKnob = Frame(listPill, RAID.listEnabled and C.KNOB_ON or C.KNOB_OFF, UDim2.new(0,20,0,20))
+  listKnob.AnchorPoint = Vector2.new(0,0.5)
+  listKnob.Position = RAID.listEnabled and UDim2.new(1,-23,0.5,0) or UDim2.new(0,3,0.5,0)
+  Corner(listKnob, 9)
+
+  listPill.MouseButton1Click:Connect(function()
+   RAID.listEnabled = not RAID.listEnabled
+   local on = RAID.listEnabled
+   TweenService:Create(listPill, TweenInfo.new(0.18, Enum.EasingStyle.Quad), {BackgroundColor3 = on and C.PILL_ON or C.PILL_OFF}):Play()
+   TweenService:Create(listKnob, TweenInfo.new(0.16), {
+    Position = on and UDim2.new(1,-23,0.5,0) or UDim2.new(0,3,0.5,0),
+    BackgroundColor3 = on and C.KNOB_ON or C.KNOB_OFF,
+   }):Play()
+   if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
+  end)
+
+  -- Tombol Save Entry
+  local saveBtn = Btn(listCtrlRow, C.ACC, UDim2.new(1,-136,1,-4))
+  saveBtn.Position = UDim2.new(0,132,0,2)
+  Corner(saveBtn, 7); Stroke(saveBtn, C.ACC2, 1, 0.3)
+  local saveLbl = Label(saveBtn, "+ Save Entry", 11, Color3.fromRGB(255,255,255), Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+  saveLbl.Size = UDim2.new(1,0,1,0)
+
+  -- Container untuk list rows (ScrollingFrame)
+  local listContainer = Instance.new("ScrollingFrame")
+  listContainer.Parent = raidInner
+  listContainer.LayoutOrder = 20
+  listContainer.BackgroundTransparency = 1
+  listContainer.BorderSizePixel = 0
+  listContainer.ScrollBarThickness = 4
+  listContainer.ScrollBarImageColor3 = C.ACC
+  listContainer.CanvasSize = UDim2.new(0,0,0,0)
+  listContainer.AutomaticCanvasSize = Enum.AutomaticSize.Y
+  listContainer.Size = UDim2.new(1,0,0,0) -- akan di-resize dinamis
+  local listLayout2 = New("UIListLayout", {Parent=listContainer, SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,4)})
+
+  -- Helper: hitung & set tinggi listContainer (max 200px)
+  local function ResizeListContainer()
+   task.defer(function()
+    task.wait(0)
+    local h = math.min(listLayout2.AbsoluteContentSize.Y, 200)
+    listContainer.Size = UDim2.new(1,0,0,h)
+    task.defer(ResizeRaidBody)
+   end)
+  end
+
+  -- Helper: build label teks untuk satu entry
+  local function EntryLabel(ent)
+   -- Maps
+   local mapsStr
+   if next(ent.maps) == nil then
+    mapsStr = "All Maps"
+   else
+    local ms = {}
+    for mn in pairs(ent.maps) do table.insert(ms, mn) end
+    table.sort(ms)
+    local parts = {}
+    for _, mn in ipairs(ms) do table.insert(parts, "Map "..mn) end
+    mapsStr = table.concat(parts, ", ")
+   end
+   -- Ranks
+   local ranksStr
+   if next(ent.ranks) == nil then
+    ranksStr = "All Ranks"
+   else
+    local rs = {}
+    for _, g in ipairs(GRADE_LIST) do
+     if ent.ranks[g] then table.insert(rs, g) end
+    end
+    ranksStr = table.concat(rs, "/")
+   end
+   return mapsStr .. "  |  Rank: " .. ranksStr
+  end
+
+  -- Buat visual row untuk 1 entry
+  local entryRowRefs = {} -- simpan referensi row agar bisa di-destroy
+
+  local function BuildEntryRow(entIdx)
+   local ent = RAID.listEntries[entIdx]
+   if not ent then return end
+
+   local row = Frame(listContainer, C.SURFACE, UDim2.new(1,0,0,32))
+   row.LayoutOrder = entIdx
+   Corner(row, 8); Stroke(row, C.BORD, 1, 0.4)
+
+   -- Nomor entry
+   local numLbl = Label(row, "#"..entIdx, 10, C.TXT3, Enum.Font.GothamBold)
+   numLbl.Size = UDim2.new(0,22,1,0); numLbl.Position = UDim2.new(0,4,0,0)
+
+   -- Label maps + rank
+   local entLbl = Label(row, EntryLabel(ent), 10, C.TXT, Enum.Font.Gotham)
+   entLbl.Size = UDim2.new(1,-72,1,0); entLbl.Position = UDim2.new(0,26,0,0)
+   entLbl.TextTruncate = Enum.TextTruncate.AtEnd
+   entLbl.TextXAlignment = Enum.TextXAlignment.Left
+
+   -- Tombol Delete
+   local delBtn = Btn(row, Color3.fromRGB(140,30,30), UDim2.new(0,40,0,24))
+   delBtn.AnchorPoint = Vector2.new(1,0.5); delBtn.Position = UDim2.new(1,-4,0.5,0)
+   Corner(delBtn, 6)
+   local delLbl = Label(delBtn, "Del", 10, Color3.fromRGB(255,255,255), Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+   delLbl.Size = UDim2.new(1,0,1,0)
+
+   entryRowRefs[entIdx] = row
+
+   delBtn.MouseButton1Click:Connect(function()
+    -- Hapus dari data
+    table.remove(RAID.listEntries, entIdx)
+    -- Rebuild semua row (urutan bisa berubah)
+    for _, ref in pairs(entryRowRefs) do
+     if ref and ref.Parent then ref:Destroy() end
+    end
+    entryRowRefs = {}
+    for i = 1, #RAID.listEntries do
+     BuildEntryRow(i)
+    end
+    ResizeListContainer()
+   end)
+  end
+
+  -- Rebuild semua rows dari scratch
+  local function RebuildAllRows()
+   for _, ref in pairs(entryRowRefs) do
+    if ref and ref.Parent then ref:Destroy() end
+   end
+   entryRowRefs = {}
+   for i = 1, #RAID.listEntries do
+    BuildEntryRow(i)
+   end
+   ResizeListContainer()
+  end
+
+  -- Render entry yang sudah ada (jika ada dari session sebelumnya)
+  RebuildAllRows()
+
+  -- Tombol Save Entry: snapshot Maps + Rank saat ini -> tambah ke list
+  saveBtn.MouseButton1Click:Connect(function()
+   -- Snapshot Maps (copy)
+   local snapMaps = {}
+   for mn, v in pairs(RAID.preferMaps) do
+    snapMaps[mn] = v
+   end
+   -- Snapshot Ranks (copy)
+   local snapRanks = {}
+   for g, v in pairs(RAID.runeGrades) do
+    snapRanks[g] = v
+   end
+   -- Tambah ke list
+   table.insert(RAID.listEntries, {maps=snapMaps, ranks=snapRanks})
+   -- Buat row baru
+   BuildEntryRow(#RAID.listEntries)
+   ResizeListContainer()
+   if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
+  end)
+
+  ResizeListContainer()
+ end -- end RAID LIST ENTRY UI do block
 
 end -- end Auto Raid do block
 
