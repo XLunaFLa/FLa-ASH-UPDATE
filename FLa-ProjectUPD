@@ -5399,31 +5399,16 @@ do
   RA.running=true; RA.killed=0; RA.cur=nil; RA.threads={}
   local tChar = task.spawn(function()
    while RA.running do
-    -- Ganti musuh RA jika kosong/mati
+    -- Ganti musuh jika kosong/mati, 1x teleport nempel
     if not RA.cur or IsDeadF(RA.cur) or not RA.cur.model.Parent then
      _deadG_F={}; RA.cur=nil
      for _,e in ipairs(GetEnemiesF()) do
-      -- [GETER] Pilih musuh RA yang BERBEDA dari target TA
-      local isTATarget = TA.running and TA.cur and (e.guid == TA.cur.guid)
-      if not IsDeadF(e) and not isTATarget then RA.cur=e; break end
-     end
-     -- Fallback: kalau semua musuh adalah target TA, ambil musuh manapun
-     if not RA.cur then
-      for _,e in ipairs(GetEnemiesF()) do
-       if not IsDeadF(e) then RA.cur=e; break end
-      end
+      if not IsDeadF(e) then RA.cur=e; break end
      end
      if RA.cur and not TA.running then TpToF(RA.cur) end
     end
-    -- [GETER] Serang musuh RA sendiri
     if RA.cur and not IsDeadF(RA.cur) and RA.cur.model.Parent then
      FCharF(RA.cur.guid, RA.cur.hrp)
-    end
-    -- [GETER] Sekaligus serang target TA jika aktif (tanpa rebut teleport)
-    if TA.running and TA.cur and not IsDeadF(TA.cur) and TA.cur.model.Parent then
-     FCharF(TA.cur.guid, TA.cur.hrp)
-    end
-    if RA.cur or (TA.running and TA.cur) then
      PingWait(0.1)  -- 10x/detik, tidak freeze
     else
      PingWait(0.2)  -- tunggu musuh muncul
