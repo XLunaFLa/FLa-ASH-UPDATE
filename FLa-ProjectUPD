@@ -5225,6 +5225,8 @@ do
  -- State
  local RA = { running=false, threads={}, killed=0, cur=nil }
  local TA = { running=false, threads={}, killed=0, cur=nil, targetName=nil }
+ local _byNameLiveToken = nil  -- [FIX] token stop loop live update By Name lama
+ local _raDiedConns = {}       -- [FIX] HumanoidDied connections untuk RA
  local _deadG_F = {}
  local HERO_GUIDS_F = {}
 
@@ -5303,6 +5305,22 @@ do
   return result
  end
 
+ -- [FIX] Freeze/Unfreeze player movement (WalkSpeed=0 selama RA/TA ON)
+ local _frozenWS = nil  -- nil = tidak di-freeze
+ local function FreezePlayer()
+  local char = LP and LP.Character; if not char then return end
+  local hum = char:FindFirstChildOfClass("Humanoid"); if not hum then return end
+  if _frozenWS == nil then _frozenWS = hum.WalkSpeed end
+  hum.WalkSpeed = 0
+ end
+ local function UnfreezePlayer()
+  if _frozenWS == nil then return end
+  local char = LP and LP.Character; if not char then return end
+  local hum = char:FindFirstChildOfClass("Humanoid")
+  if hum then hum.WalkSpeed = _walkSpeedState or _frozenWS end
+  _frozenWS = nil
+ end
+
  -- [EDIT] TpToF — teleport ke HumanoidRootPart musuh, jarak 5 stud dari musuh
  local function TpToF(tgt)
   if not tgt or not tgt.hrp then return end
@@ -5330,6 +5348,9 @@ do
    if r and r.Position.Y >= (tgtPos.Y-30) then safePos = r.Position+Vector3.new(0,3,0); break end
   end
   hrp.CFrame = CFrame.new(safePos or nearPos+Vector3.new(0,3,0))
+  -- [FIX] Langsung freeze setelah teleport (pastikan WalkSpeed tetap 0)
+  local hum = char:FindFirstChildOfClass("Humanoid")
+  if hum then hum.WalkSpeed = 0 end
  end
 
  -- [EDIT] Hitung posisi 5 stud dari musuh ke arah player (untuk serangan)
@@ -5397,9 +5418,24 @@ do
    end)
   end
   RA.running=true; RA.killed=0; RA.cur=nil; RA.threads={}
+  -- [FIX] Freeze player saat RA dimulai
+  FreezePlayer()
+  -- [FIX] HumanoidDied listener untuk deteksi mati instan pada musuh RA
+  local _raDiedConns = {}
+  local function WatchEnemyRA(e)
+   if not e or not e.model then return end
+   local hum = e.model:FindFirstChildOfClass("Humanoid"); if not hum then return end
+   local conn; conn = hum.Died:Connect(function()
+    _deadG_F[e.guid] = true
+    if RA.running then RA.killed = RA.killed + 1 end
+    if RA.cur and RA.cur.guid == e.guid then RA.cur = nil end
+    pcall(function() conn:Disconnect() end)
+   end)
+   table.insert(_raDiedConns, conn)
+  end
   local tChar = task.spawn(function()
    while RA.running do
-    -- Ganti musuh RA jika kosong/mati
+    -- Ganti musuh RA jika kosong/mati (instan via _deadG_F)
     if not RA.cur or IsDeadF(RA.cur) or not RA.cur.model.Parent then
      _deadG_F={}; RA.cur=nil
      for _,e in ipairs(GetEnemiesF()) do
@@ -5413,7 +5449,13 @@ do
        if not IsDeadF(e) then RA.cur=e; break end
       end
      end
-     if RA.cur and not TA.running then TpToF(RA.cur) end
+     if RA.cur then
+      if not TA.running then TpToF(RA.cur) end
+      -- [FIX] Pasang HumanoidDied listener untuk target RA baru
+      WatchEnemyRA(RA.cur)
+      -- [FIX] Re-freeze setelah teleport (pastikan tidak slip)
+      FreezePlayer()
+     end
     end
     -- [GETER] Serang musuh RA sendiri
     if RA.cur and not IsDeadF(RA.cur) and RA.cur.model.Parent then
@@ -5424,9 +5466,9 @@ do
      FCharF(TA.cur.guid, TA.cur.hrp)
     end
     if RA.cur or (TA.running and TA.cur) then
-     PingWait(0.1)  -- 10x/detik, tidak freeze
+     PingWait(0.1)  -- 10x/detik
     else
-     PingWait(0.2)  -- tunggu musuh muncul
+     PingWait(0.1)  -- [FIX] percepat: tidak lagi 0.2 agar cepat scan musuh baru
     end
    end
   end)
@@ -5438,15 +5480,35 @@ do
   RA.running = false
   for _,t in ipairs(RA.threads) do pcall(function() task.cancel(t) end) end
   RA.threads={}; RA.cur=nil
+  -- [FIX] Disconnect semua HumanoidDied listener RA
+  for _,c in ipairs(_raDiedConns or {}) do pcall(function() c:Disconnect() end) end
+  _raDiedConns = {}
+  -- [FIX] Unfreeze player hanya jika TA juga tidak running
+  if not TA.running then UnfreezePlayer() end
  end
 
  -- StartTA By ID — target spesifik GUID, stop jika mati
  local function StartTA_ByID(targetGuid, targetName, onStatus, onStop)
   TA.running=true; TA.killed=0; TA.targetName=targetName; TA.cur=nil; TA.threads={}
+  -- [FIX] Freeze player saat TA dimulai
+  FreezePlayer()
   local tChar = task.spawn(function()
    -- 1x teleport nempel saat mulai
    local tgt = FindByGuidF(targetGuid)
-   if tgt then TpToF(tgt) end
+   if tgt then
+    TpToF(tgt); TA.cur = tgt
+    -- [FIX] HumanoidDied listener: instan deteksi mati
+    local hum = tgt.model and tgt.model:FindFirstChildOfClass("Humanoid")
+    if hum then
+     hum.Died:Connect(function()
+      _deadG_F[targetGuid] = true
+      if TA.running then TA.killed = TA.killed + 1 end
+      TA.cur = nil; TA.running = false
+      if onStatus then onStatus("✕ ["..targetName.."] mati") end
+      if onStop then task.defer(onStop) end
+     end)
+    end
+   end
    while TA.running do
     tgt = FindByGuidF(targetGuid)
     if not tgt then
@@ -5461,9 +5523,9 @@ do
      TA.cur = tgt
      FCharF(tgt.guid, tgt.hrp)
      if onStatus then onStatus(">> ["..targetName.."] •"..(tgt.guid:sub(-5)).." Kill: "..TA.killed) end
-     PingWait(0.1)  -- 10x/detik, tidak freeze
+     PingWait(0.1)
     else
-     PingWait(0.2)
+     PingWait(0.05)  -- [FIX] percepat polling mati
     end
    end
   end)
@@ -5474,20 +5536,36 @@ do
  -- StartTA By Name — round-robin semua musuh senama, pindah saat kill
  local function StartTA_ByName(targetName, onStatus, onStop)
   TA.running=true; TA.killed=0; TA.targetName=targetName; TA.cur=nil; TA.threads={}
+  -- [FIX] Freeze player saat TA ByName dimulai
+  FreezePlayer()
   local tChar = task.spawn(function()
    local rrIdx = 1
+   -- [FIX] Flag instan: set true oleh HumanoidDied, direset setelah pindah target
+   local _curDied = false
+   local _diedConn = nil
+   local function WatchTarget(tgt)
+    if _diedConn then pcall(function() _diedConn:Disconnect() end); _diedConn = nil end
+    if not tgt or not tgt.model then return end
+    local hum = tgt.model:FindFirstChildOfClass("Humanoid"); if not hum then return end
+    _diedConn = hum.Died:Connect(function()
+     _deadG_F[tgt.guid] = true
+     if TA.running then TA.killed = TA.killed + 1 end
+     _curDied = true  -- sinyal instan ke loop utama
+     if TA.cur and TA.cur.guid == tgt.guid then TA.cur = nil end
+    end)
+   end
    while TA.running do
     local pool = FindAllByNameF(targetName)
     if #pool == 0 then
      -- Semua mati → tunggu respawn
      if onStatus then onStatus("WAITING ["..targetName.."] respawn...") end
      while TA.running do
-      PingWait(0.5)
+      PingWait(0.2)  -- [FIX] lebih cepat scan respawn
       pool = FindAllByNameF(targetName)
       if #pool > 0 then break end
      end
      if not TA.running then break end
-     _deadG_F={}; rrIdx=1
+     _deadG_F={}; rrIdx=1; _curDied=false
     end
     -- Clamp index
     if rrIdx > #pool then rrIdx = 1 end
@@ -5495,24 +5573,31 @@ do
     if not tgt or IsDeadF(tgt) then
      -- Musuh di index ini sudah mati, skip ke berikutnya
      rrIdx = rrIdx + 1
-     PingWait(0.1)  -- jeda minimal, tidak freeze
+     PingWait(0.05)  -- [FIX] percepat skip mati
     else
      TA.cur = tgt
+     _curDied = false
      -- 1x teleport nempel saat ganti target
      TpToF(tgt)
-     -- Serang musuh ini sampai mati
-     while TA.running and not IsDeadF(tgt) and tgt.model.Parent do
+     -- [FIX] Re-freeze setelah teleport
+     FreezePlayer()
+     -- [FIX] Pasang HumanoidDied listener pada target saat ini
+     WatchTarget(tgt)
+     -- Serang musuh ini sampai mati (deteksi via _curDied = instan)
+     while TA.running and not _curDied and not IsDeadF(tgt) and tgt.model.Parent do
       FCharF(tgt.guid, tgt.hrp)
       if onStatus then onStatus(">> ["..targetName.."] ["..rrIdx.."/"..#pool.."] Kill: "..TA.killed) end
-      PingWait(0.1)  -- 10x/detik, tidak freeze
+      PingWait(0.1)
      end
      -- Mati → pindah ke berikutnya
      if TA.running then
       rrIdx = rrIdx + 1
-      _deadG_F={}
+      _curDied = false
      end
     end
    end
+   -- Cleanup listener saat loop selesai
+   if _diedConn then pcall(function() _diedConn:Disconnect() end) end
   end)
   TA.threads = {tChar}
   StartCollectF(function() return TA.running end)
@@ -5522,6 +5607,8 @@ do
   TA.running = false
   for _,t in ipairs(TA.threads) do pcall(function() task.cancel(t) end) end
   TA.threads={}; TA.cur=nil; TA.targetName=nil
+  -- [FIX] Unfreeze player hanya jika RA juga tidak running
+  if not RA.running then UnfreezePlayer() end
  end
 
  -- ── GUI ──────────────────────────────────────────────────────
@@ -5740,9 +5827,12 @@ do
    end
    statLbl.Text = #names.." jenis, "..#enemies.." total (By Name)"
 
-   -- Live update count By Name
+   -- [FIX] Live update count By Name
+   -- Token unik tiap Refresh: loop lama otomatis berhenti saat token berubah
+   local _liveToken = {}
+   _byNameLiveToken = _liveToken
    task.spawn(function()
-    while p.Parent do
+    while p.Parent and _byNameLiveToken == _liveToken do
      local live = {}
      for _,e in ipairs(GetEnemiesF()) do
       if not IsDeadF(e) then live[e.name]=(live[e.name] or 0)+1 end
@@ -5753,12 +5843,13 @@ do
        local a = live[nm2] or 0
        if r.c then
         r.c.Text = "x"..a
+        -- [FIX] Hanya ubah warna, JANGAN destroy row
+        -- Destroy row = penyebab daftar ilang saat pindah mode By ID -> By Name
         r.c.TextColor3 = a==0 and C.RED or C.DIM
        end
-       -- Hilangkan row jika count = 0 (semua mati)
-       if a == 0 then
-        if taOn and activeRow == r then StopCurrentTA() end
-        r.f:Destroy(); eRows[nm2] = nil
+       -- [FIX] Jika count=0 dan row ini aktif di TA, stop TA saja
+       if a == 0 and taOn and activeRow == r then
+        StopCurrentTA()
        end
       end
      end
@@ -19217,7 +19308,27 @@ do
  -- ============================================================
  -- CONFIG FILE PATH
  -- ============================================================
- local CONFIG_PATH = "FLaProjectConfig.json"
+ local CONFIG_FOLDER = "FLaConfigs"
+
+ -- Helper folder
+ local function _ensureFolder()
+  if not isfolder(CONFIG_FOLDER) then pcall(makefolder, CONFIG_FOLDER) end
+ end
+ local function _cfgPath(name)
+  return CONFIG_FOLDER.."/"..name..".json"
+ end
+ local function ListConfigs()
+  _ensureFolder()
+  local ok, files = pcall(listfiles, CONFIG_FOLDER)
+  if not ok or type(files) ~= "table" then return {} end
+  local names = {}
+  for _, f in ipairs(files) do
+   local n = tostring(f):match("([^/\\]+)%.json$")
+   if n and n ~= "" then table.insert(names, n) end
+  end
+  table.sort(names)
+  return names
+ end
 
  -- ============================================================
  -- JSON encode/decode minimal (untuk Luau tanpa loadstring)
@@ -19511,11 +19622,11 @@ do
  -- ============================================================
  -- SAVE CONFIG
  -- ============================================================
- local function SaveConfig()
+ local function SaveConfigAs(name)
+  _ensureFolder()
   local ok, err = pcall(function()
    local cfg = CollectConfig()
-   local encoded = jsonEncode(cfg)
-   writefile(CONFIG_PATH, encoded)
+   writefile(_cfgPath(name), jsonEncode(cfg))
   end)
   return ok, err
  end
@@ -19982,48 +20093,42 @@ do
  end
 
  -- ============================================================
- -- LOAD CONFIG dari file
+ -- LOAD / DELETE CONFIG (multi-file)
  -- ============================================================
- local function LoadConfig()
+ local function LoadConfigByName(name)
   local ok, result = pcall(function()
-   if not isfile(CONFIG_PATH) then return nil, "File tidak ditemukan" end
-   local raw = readfile(CONFIG_PATH)
-   if not raw or raw == "" then return nil, "File kosong" end
-   local cfg = jsonDecode(raw)
-   if type(cfg) ~= "table" then return nil, "Format config tidak valid" end
-   return cfg
+   local path = _cfgPath(name)
+   if not isfile(path) then return nil end
+   local raw = readfile(path)
+   if not raw or raw == "" then return nil end
+   return jsonDecode(raw)
   end)
-  if not ok then return nil, tostring(result) end
+  if not ok then return nil end
+  if type(result) ~= "table" then return nil end
   return result
  end
 
- -- ============================================================
- -- DELETE CONFIG
- -- ============================================================
- local function DeleteConfig()
-  local ok, err = pcall(function()
-   if isfile(CONFIG_PATH) then
-    delfile(CONFIG_PATH)
-   end
+ local function DeleteConfigByName(name)
+  local ok = pcall(function()
+   local path = _cfgPath(name)
+   if isfile(path) then delfile(path) end
   end)
   return ok
- end
-
- local function HasConfig()
-  local ok, res = pcall(function() return isfile(CONFIG_PATH) end)
-  return ok and res == true
  end
 
  -- ============================================================
  -- UI - PANEL CONFIG
  -- ============================================================
+ -- UI - PANEL CONFIG (Multi-File Manager)
+ -- ============================================================
+
  -- Header card
  local hdrCard = Frame(p, C.BG3, UDim2.new(1,0,0,56))
  hdrCard.LayoutOrder = 0; Corner(hdrCard,10); Stroke(hdrCard,C.BORD,1.5,0.5)
  Padding(hdrCard, 8, 8, 12, 12)
  local hdrTitle = Label(hdrCard, "CONFIG MANAGER", 13, C.ACC2, Enum.Font.GothamBold, Enum.TextXAlignment.Left)
  hdrTitle.Size = UDim2.new(1,0,0,18)
- local hdrSub = Label(hdrCard, "Save dan load semua state fitur yang aktif ke file.", 10, C.DIM, Enum.Font.Gotham, Enum.TextXAlignment.Left)
+ local hdrSub = Label(hdrCard, "Multi-slot save/load. Simpan config sebanyak yang kamu mau.", 10, C.DIM, Enum.Font.Gotham, Enum.TextXAlignment.Left)
  hdrSub.Size = UDim2.new(1,0,0,14); hdrSub.Position = UDim2.new(0,0,0,22)
  hdrSub.TextWrapped = true
 
@@ -20033,7 +20138,7 @@ do
  Padding(statusCard, 6,6,12,12)
  local statusDot = Frame(statusCard, Color3.fromRGB(100,100,100), UDim2.new(0,8,0,8))
  statusDot.Position = UDim2.new(0,0,0.5,-4); Corner(statusDot,4)
- local statusLbl = Label(statusCard, "Belum ada config tersimpan.", 11, C.TXT2, Enum.Font.Gotham, Enum.TextXAlignment.Left)
+ local statusLbl = Label(statusCard, "Pilih aksi di bawah.", 11, C.TXT2, Enum.Font.Gotham, Enum.TextXAlignment.Left)
  statusLbl.Size = UDim2.new(1,-16,1,0); statusLbl.Position = UDim2.new(0,16,0,0)
  statusLbl.TextTruncate = Enum.TextTruncate.AtEnd
 
@@ -20043,238 +20148,303 @@ do
   statusDot.BackgroundColor3 = col or Color3.fromRGB(100,100,100)
  end
 
- -- Cek awal apakah config sudah ada
- if HasConfig() then
-  SetStatus("Config ditemukan. Klik Load Config untuk menerapkan.", C.ACC2)
- end
-
- -- ── 3 tombol utama ───────────────────────────────────────
- local btnRow = Frame(p, C.BLACK, UDim2.new(1,0,0,48))
+ -- Button row (3 tombol utama)
+ local btnRow = Frame(p, C.BLACK, UDim2.new(1,0,0,44))
  btnRow.BackgroundTransparency = 1; btnRow.LayoutOrder = 2
- local brl = New("UIListLayout",{Parent=btnRow, FillDirection=Enum.FillDirection.Horizontal,
+ New("UIListLayout",{Parent=btnRow, FillDirection=Enum.FillDirection.Horizontal,
   SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,8),
   VerticalAlignment=Enum.VerticalAlignment.Center})
 
- -- SAVE CONFIG
- local btnSave = Btn(btnRow, C.ACC, UDim2.new(0.32,0,1,0))
+ local btnSave = Btn(btnRow, C.ACC,  UDim2.new(0.32,0,1,0))
  btnSave.LayoutOrder = 1; Corner(btnSave,10)
  New("UIStroke",{Parent=btnSave,Color=C.ACC2,Thickness=1.5,Transparency=0.4})
- local lblSave = Label(btnSave,"SAVE CONFIG",11,Color3.fromRGB(255,255,255),Enum.Font.GothamBold,Enum.TextXAlignment.Center)
+ local lblSave = Label(btnSave,"SAVE",11,Color3.fromRGB(255,255,255),Enum.Font.GothamBold,Enum.TextXAlignment.Center)
  lblSave.Size = UDim2.new(1,0,1,0)
 
- -- LOAD CONFIG
  local btnLoad = Btn(btnRow, C.BG3, UDim2.new(0.34,0,1,0))
  btnLoad.LayoutOrder = 2; Corner(btnLoad,10)
  New("UIStroke",{Parent=btnLoad,Color=C.ACC2,Thickness=1.5,Transparency=0.5})
- local lblLoad = Label(btnLoad,"LOAD CONFIG",11,C.ACC2,Enum.Font.GothamBold,Enum.TextXAlignment.Center)
+ local lblLoad = Label(btnLoad,"LOAD",11,C.ACC2,Enum.Font.GothamBold,Enum.TextXAlignment.Center)
  lblLoad.Size = UDim2.new(1,0,1,0)
 
- -- DELETE CONFIG
  local btnDel = Btn(btnRow, C.BG3, UDim2.new(0.32,0,1,0))
  btnDel.LayoutOrder = 3; Corner(btnDel,10)
  New("UIStroke",{Parent=btnDel,Color=Color3.fromRGB(200,80,80),Thickness=1.5,Transparency=0.5})
  local lblDel = Label(btnDel,"DELETE",11,Color3.fromRGB(220,100,100),Enum.Font.GothamBold,Enum.TextXAlignment.Center)
  lblDel.Size = UDim2.new(1,0,1,0)
 
- -- ── Preview card ─────────────────────────────────────────
- local previewCard = Frame(p, C.SURFACE, UDim2.new(1,0,0,0))
- previewCard.LayoutOrder = 3; Corner(previewCard,10); Stroke(previewCard,C.BORD,1.5,0.7)
- previewCard.AutomaticSize = Enum.AutomaticSize.Y
- Padding(previewCard, 10, 10, 12, 12)
- local previewLayout = New("UIListLayout",{Parent=previewCard, SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,4)})
+ -- ── Sub-panel (panel dinamis muncul di bawah tombol) ─────
+ local subPanel = Frame(p, C.SURFACE, UDim2.new(1,0,0,0))
+ subPanel.LayoutOrder = 3; subPanel.ClipsDescendants = true
+ subPanel.Visible = false; Corner(subPanel,10); Stroke(subPanel,C.BORD,1.5,0.6)
 
- local previewTitle = Label(previewCard,"PREVIEW ISI CONFIG",10,C.TXT3,Enum.Font.GothamBold,Enum.TextXAlignment.Left)
- previewTitle.Size = UDim2.new(1,0,0,14); previewTitle.LayoutOrder = 0
+ local _activeMode = nil -- "save" | "load" | "delete" | nil
 
- local previewLines = {}
- local function MakePreviewLine(order)
-  local lbl = Label(previewCard,"",10,C.TXT2,Enum.Font.Gotham,Enum.TextXAlignment.Left)
-  lbl.Size = UDim2.new(1,0,0,13); lbl.LayoutOrder = order
-  lbl.TextTruncate = Enum.TextTruncate.AtEnd
-  return lbl
- end
-
- local function RefreshPreview()
-  -- Bersihkan baris lama
-  for _,l in ipairs(previewLines) do l:Destroy() end
-  previewLines = {}
-
-  if not HasConfig() then
-   local l = MakePreviewLine(1)
-   l.Text = "  Belum ada config tersimpan."
-   l.TextColor3 = C.TXT3
-   table.insert(previewLines, l)
-   return
-  end
-
-  local cfg = LoadConfig()
-  if type(cfg) ~= "table" then
-   local l = MakePreviewLine(1)
-   l.Text = "  Gagal membaca config."
-   l.TextColor3 = Color3.fromRGB(220,100,100)
-   table.insert(previewLines, l)
-   return
-  end
-
-  local items = {
-   {"Main - Auto Sell Hero Equip",   cfg.sellHeroOn},
-   {"Main - Auto Collect Gold/Item", cfg.autoCollectOn},
-   {"Main - Auto Sell Weapon",       cfg.sellWeaponOn},
-   {"Main - Auto Decomp Gem",        cfg.decompGemOn},
-   {"Hide - Hide Reroll Chat",       cfg.hideRerollChat},
-   {"Hide - Hide All UI",            cfg.hideAllUI},
-   {"Hide - Hide All Anim",          cfg.hideAllAnim},
-   {"Hide - Auto Hide Reward",       cfg.hideReward},
-   {"Farm - Random Attack",          cfg.randomAttackOn},
-   {"Attack - Mass Attack",          cfg.massAttackOn},
-   {"Attack - Skill Z",              cfg.skillZ},
-   {"Attack - Skill X",              cfg.skillX},
-   {"Attack - Skill C",              cfg.skillC},
-   {"Attack - Skill V",              cfg.skillV},
-   {"Attack - Skill F",              cfg.skillF},
-   {"Player - No Clip",              cfg.noClipOn},
-   {"Player - Anti AFK",             cfg.antiAfkOn},
-   {"Player - Walk Speed",           cfg.walkSpeed and tostring(cfg.walkSpeed) or "16"},
-   {"Automation - Auto Raid",        cfg.raidOn},
-   {"Automation - Raid Pick Mode",   cfg.raidPMIdx and ({[1]="Default",[2]="By Rank",[3]="By Map",[4]="Hard",[5]="Easy",[6]="Manual"})[cfg.raidPMIdx] or "Default"},
-   {"Automation - Raid Updown",      cfg.raidUpdownEnabled},
-   {"Automation - Raid Updown Dir",  cfg.raidUpdownDir or "up"},
-   {"Automation - Raid Updown Grade",cfg.raidUpdownTargetGrade or "none"},
-   {"Automation - Raid Rune Map",    cfg.raidRuneMapTarget and tostring(cfg.raidRuneMapTarget) or "0"},
-   {"Automation - Raid List Mode",   cfg.raidListEnabled},
-   {"Automation - Auto Asc",         cfg.ascOn},
-   {"Automation - Auto Siege",       cfg.siegeOn},
-   {"Automation - Auto Dungeon",     cfg.dungeonOn},
-   {"Automation - Auto ST2",         cfg.st2On},
-   {"Reroll - Hero Fastroll",        cfg.heroRollOn},
-   {"Reroll - Hero x100",            cfg.heroX100On},
-   {"Reroll - Weapon Fastroll",      cfg.weaponRollOn},
-   {"Reroll - Weapon x100",          cfg.weaponX100On},
-   {"Reroll - Merge Potion",         cfg.mergeOn},
-   {"Reroll - Use Potion",           cfg.useOn},
-   {"Main - Sell Weapon (All?)",     cfg.swSelectAll},
-   {"Main - Decomp Gem Min",         cfg.gemMinLevel and tostring(cfg.gemMinLevel) or "1"},
-   {"Main - Decomp Gem Max",         cfg.gemMaxLevel and tostring(cfg.gemMaxLevel) or "1"},
-   {"Settings - Webhook",            cfg.webhookEnabled},
-   {"Settings - Webhook Mode",       cfg.webhookMode or "both"},
-   -- {"Settings - Potato Mode", removed},
-   {"Theme - Palette",               cfg.themeName or "Solo Leveling"},
-   {"Theme - Transparency",          cfg.themeTransparency and string.format("%.2f", cfg.themeTransparency) or "0"},
-  }
-
-  -- PetGear per slot
-  if cfg.pgrOn then
-   for i=1,3 do
-    table.insert(items, {"Reroll - PetGear Slot "..i, cfg.pgrOn[i]})
-   end
-  end
-  -- Halo
-  if cfg.haloOn then
-   for i=1,3 do
-    table.insert(items, {"Reroll - Halo "..i, cfg.haloOn[i]})
-   end
-  end
-  -- Ornament
-  if cfg.ornOn then
-   for i=1,#cfg.ornOn do
-    table.insert(items, {"Reroll - Ornament "..i, cfg.ornOn[i]})
-   end
-  end
-
-  for i,item in ipairs(items) do
-   local l = MakePreviewLine(i)
-   local label = item[1]
-   local val   = item[2]
-   local valStr
-   if type(val) == "boolean" then
-    valStr = val and "ON" or "OFF"
-   else
-    valStr = tostring(val or "-")
-   end
-   l.Text = "  "..label..":  "..valStr
-   l.TextColor3 = (val == true) and C.ACC2 or C.TXT3
-   table.insert(previewLines, l)
+ -- Helper: bersihkan isi subPanel
+ local function ClearSub()
+  for _,c in ipairs(subPanel:GetChildren()) do
+   if not c:IsA("UIListLayout") then c:Destroy() end
   end
  end
 
- -- ── Button handlers ───────────────────────────────────────
- local _saving = false
- btnSave.MouseButton1Click:Connect(function()
-  if _saving then return end
-  _saving = true
-  lblSave.Text = "SAVING..."
-  SetStatus("Menyimpan config...", Color3.fromRGB(255,200,60))
-  task.delay(0.1, function()
-   local ok, err = SaveConfig()
-   _saving = false
-   if ok then
-    lblSave.Text = "SAVE CONFIG"
-    SetStatus("Config tersimpan. ("..os.date("%H:%M:%S")..")", C.ACC2)
-    RefreshPreview()
-   else
-    lblSave.Text = "SAVE CONFIG"
-    SetStatus("[!] Gagal menyimpan: "..(tostring(err):sub(1,40)), Color3.fromRGB(220,100,100))
-   end
-  end)
- end)
+ -- Helper: resize subPanel sesuai konten
+ local subLayout = New("UIListLayout",{Parent=subPanel, SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,6)})
+ local function ResizeSub()
+  subLayout:ApplyLayout()
+  subPanel.Size = UDim2.new(1,0,0, subLayout.AbsoluteContentSize.Y + 16)
+ end
 
- local _loading = false
- btnLoad.MouseButton1Click:Connect(function()
-  if _loading then return end
-  _loading = true
-  lblLoad.Text = "LOADING..."
-  SetStatus("Memuat config...", Color3.fromRGB(255,200,60))
-  task.delay(0.1, function()
-   local cfg, err = LoadConfig()
-   if type(cfg) ~= "table" then
-    _loading = false
-    lblLoad.Text = "LOAD CONFIG"
-    SetStatus("[!] "..(err or "File tidak ditemukan atau rusak."), Color3.fromRGB(220,100,100))
+ -- Helper: buat item list config (untuk load/delete)
+ local function MakeListItem(parent, order, name, onSelect)
+  local row = Btn(parent, C.BG3, UDim2.new(1,0,0,34))
+  row.LayoutOrder = order; Corner(row,8)
+  Stroke(row, C.BORD, 1, 0.6)
+  Padding(row, 0, 0, 10, 10)
+  local lbl = Label(row, name, 11, C.TXT2, Enum.Font.Gotham, Enum.TextXAlignment.Left)
+  lbl.Size = UDim2.new(1,-32,1,0)
+  local arr = Label(row, ">", 11, C.TXT3, Enum.Font.GothamBold, Enum.TextXAlignment.Right)
+  arr.Size = UDim2.new(0,20,1,0); arr.Position = UDim2.new(1,-20,0,0)
+  row.MouseButton1Click:Connect(function() onSelect(name, row, lbl, arr) end)
+  return row, lbl
+ end
+
+ -- ════════════════════════════════════════════════════════
+ -- MODE: SAVE
+ -- ════════════════════════════════════════════════════════
+ local function OpenSaveMode()
+  ClearSub()
+  subPanel.Visible = true
+  local inner = Frame(subPanel, C.BLACK, UDim2.new(1,-16,0,0))
+  inner.BackgroundTransparency = 1; inner.Position = UDim2.new(0,8,0,8)
+  inner.LayoutOrder = 0
+  New("UIListLayout",{Parent=inner, SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,6)})
+
+  -- Label
+  local titleLbl = Label(inner,"Nama Config Baru / Timpa yang Ada:",10,C.TXT3,Enum.Font.GothamBold,Enum.TextXAlignment.Left)
+  titleLbl.Size = UDim2.new(1,0,0,14); titleLbl.LayoutOrder = 0
+
+  -- TextBox input nama
+  local inputFrame = Frame(inner, C.BG3, UDim2.new(1,0,0,34))
+  inputFrame.LayoutOrder = 1; Corner(inputFrame,8); Stroke(inputFrame,C.ACC,1.5,0.5)
+  local tb = Instance.new("TextBox"); tb.Parent = inputFrame
+  tb.Size = UDim2.new(1,-16,1,0); tb.Position = UDim2.new(0,8,0,0)
+  tb.BackgroundTransparency = 1; tb.Text = ""
+  tb.PlaceholderText = "Ketik nama config..."; tb.PlaceholderColor3 = C.TXT3
+  tb.TextColor3 = C.TXT2; tb.Font = Enum.Font.Gotham; tb.TextSize = 12
+  tb.ClearTextOnFocus = false
+
+  -- Tombol Confirm Save
+  local confirmBtn = Btn(inner, C.ACC, UDim2.new(1,0,0,34))
+  confirmBtn.LayoutOrder = 2; Corner(confirmBtn,8)
+  New("UIStroke",{Parent=confirmBtn,Color=C.ACC2,Thickness=1.5,Transparency=0.3})
+  local confirmLbl = Label(confirmBtn,"SIMPAN",12,Color3.fromRGB(255,255,255),Enum.Font.GothamBold,Enum.TextXAlignment.Center)
+  confirmLbl.Size = UDim2.new(1,0,1,0)
+
+  confirmBtn.MouseButton1Click:Connect(function()
+   local name = tb.Text:match("^%s*(.-)%s*$")
+   if name == "" then
+    SetStatus("[!] Nama config tidak boleh kosong.", Color3.fromRGB(220,100,100))
     return
    end
-   local ok2 = ApplyConfig(cfg)
-   _loading = false
-   lblLoad.Text = "LOAD CONFIG"
-   if ok2 then
-    SetStatus("Config berhasil diterapkan. ("..os.date("%H:%M:%S")..")", C.ACC2)
-   else
-    SetStatus("[!] Partial load — beberapa setter belum siap.", Color3.fromRGB(255,180,60))
-   end
-  end)
- end)
-
- local _confirmDel = false
- local _confirmTimer = nil
- btnDel.MouseButton1Click:Connect(function()
-  if not _confirmDel then
-   _confirmDel = true
-   lblDel.Text = "YAKIN?"
-   lblDel.TextColor3 = Color3.fromRGB(255,80,80)
-   SetStatus("Klik DELETE sekali lagi untuk konfirmasi hapus config.", Color3.fromRGB(255,140,60))
-   if _confirmTimer then task.cancel(_confirmTimer) end
-   _confirmTimer = task.delay(4, function()
-    _confirmDel = false
-    lblDel.Text = "DELETE"
-    lblDel.TextColor3 = Color3.fromRGB(220,100,100)
-    SetStatus(HasConfig() and "Config ditemukan. Klik Load Config untuk menerapkan." or "Belum ada config tersimpan.", HasConfig() and C.ACC2 or C.TXT2)
+   -- Sanitize: hilangkan karakter yang tidak aman untuk nama file
+   name = name:gsub('[/\\:*?"<>|]','_')
+   confirmLbl.Text = "MENYIMPAN..."
+   task.delay(0.05, function()
+    local ok, err = SaveConfigAs(name)
+    if ok then
+     SetStatus("Tersimpan sebagai: "..name..".json", C.ACC2)
+     confirmLbl.Text = "SIMPAN"
+     -- Refresh list config di bawah (jika sudah ada)
+     OpenSaveMode()
+    else
+     SetStatus("[!] Gagal: "..(tostring(err):sub(1,40)), Color3.fromRGB(220,100,100))
+     confirmLbl.Text = "SIMPAN"
+    end
    end)
-  else
-   _confirmDel = false
-   if _confirmTimer then pcall(function() task.cancel(_confirmTimer) end) end
-   lblDel.Text = "DELETE"
-   lblDel.TextColor3 = Color3.fromRGB(220,100,100)
-   local ok = DeleteConfig()
-   if ok then
-    SetStatus("Config dihapus dari workspace.", Color3.fromRGB(220,100,100))
-    RefreshPreview()
-   else
-    SetStatus("[!] Gagal menghapus config.", Color3.fromRGB(220,100,100))
+  end)
+
+  -- Separator
+  local sep = Frame(inner, C.BORD, UDim2.new(1,0,0,1))
+  sep.LayoutOrder = 3; sep.BackgroundTransparency = 0.5
+
+  -- List config yang sudah ada (klik untuk isi nama)
+  local names = ListConfigs()
+  if #names > 0 then
+   local existLbl = Label(inner,"Klik untuk timpa config yang ada:",10,C.TXT3,Enum.Font.Gotham,Enum.TextXAlignment.Left)
+   existLbl.Size = UDim2.new(1,0,0,13); existLbl.LayoutOrder = 4
+
+   local listScroll = Instance.new("ScrollingFrame"); listScroll.Parent = inner
+   listScroll.LayoutOrder = 5
+   listScroll.Size = UDim2.new(1,0,0, math.min(#names,4)*38+4)
+   listScroll.CanvasSize = UDim2.new(1,0,0,#names*38+4)
+   listScroll.ScrollBarThickness = 4; listScroll.BackgroundTransparency = 1
+   listScroll.BorderSizePixel = 0
+   New("UIListLayout",{Parent=listScroll, SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,4)})
+
+   for i,n in ipairs(names) do
+    MakeListItem(listScroll, i, n, function(selName)
+     tb.Text = selName
+     SetStatus("Nama diisi: "..selName.." - klik SIMPAN untuk timpa.", Color3.fromRGB(255,200,60))
+    end)
    end
   end
+
+  inner.Size = UDim2.new(1,-16,0,0)
+  inner.AutomaticSize = Enum.AutomaticSize.Y
+  subPanel.AutomaticSize = Enum.AutomaticSize.Y
+  subPanel.Size = UDim2.new(1,0,0,0)
+ end
+
+ -- ════════════════════════════════════════════════════════
+ -- MODE: LOAD
+ -- ════════════════════════════════════════════════════════
+ local function OpenLoadMode()
+  ClearSub()
+  subPanel.Visible = true
+  local inner = Frame(subPanel, C.BLACK, UDim2.new(1,-16,0,0))
+  inner.BackgroundTransparency = 1; inner.Position = UDim2.new(0,8,0,8)
+  inner.LayoutOrder = 0; inner.AutomaticSize = Enum.AutomaticSize.Y
+  New("UIListLayout",{Parent=inner, SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,6)})
+
+  local titleLbl = Label(inner,"Pilih config untuk di-load:",10,C.TXT3,Enum.Font.GothamBold,Enum.TextXAlignment.Left)
+  titleLbl.Size = UDim2.new(1,0,0,14); titleLbl.LayoutOrder = 0
+
+  local names = ListConfigs()
+  if #names == 0 then
+   local emptyLbl = Label(inner,"Belum ada config tersimpan.",11,C.TXT3,Enum.Font.Gotham,Enum.TextXAlignment.Left)
+   emptyLbl.Size = UDim2.new(1,0,0,20); emptyLbl.LayoutOrder = 1
+  else
+   local listScroll = Instance.new("ScrollingFrame"); listScroll.Parent = inner
+   listScroll.LayoutOrder = 1
+   listScroll.Size = UDim2.new(1,0,0, math.min(#names,5)*38+4)
+   listScroll.CanvasSize = UDim2.new(1,0,0,#names*38+4)
+   listScroll.ScrollBarThickness = 4; listScroll.BackgroundTransparency = 1
+   listScroll.BorderSizePixel = 0
+   New("UIListLayout",{Parent=listScroll, SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,4)})
+
+   for i, n in ipairs(names) do
+    MakeListItem(listScroll, i, n, function(selName, row, lbl, arr)
+     lbl.TextColor3 = Color3.fromRGB(255,200,60)
+     arr.Text = "..."
+     SetStatus("Memuat: "..selName.."...", Color3.fromRGB(255,200,60))
+     task.delay(0.05, function()
+      local cfg = LoadConfigByName(selName)
+      if type(cfg) == "table" then
+       ApplyConfig(cfg)
+       SetStatus("Loaded: "..selName.." ("..os.date("%H:%M:%S")..")", C.ACC2)
+       lbl.TextColor3 = C.ACC2; arr.Text = "v"
+      else
+       SetStatus("[!] Gagal load: "..selName, Color3.fromRGB(220,100,100))
+       lbl.TextColor3 = Color3.fromRGB(220,100,100); arr.Text = "X"
+      end
+     end)
+    end)
+   end
+  end
+
+  subPanel.AutomaticSize = Enum.AutomaticSize.Y
+  subPanel.Size = UDim2.new(1,0,0,0)
+ end
+
+ -- ════════════════════════════════════════════════════════
+ -- MODE: DELETE
+ -- ════════════════════════════════════════════════════════
+ local function OpenDeleteMode()
+  ClearSub()
+  subPanel.Visible = true
+  local inner = Frame(subPanel, C.BLACK, UDim2.new(1,-16,0,0))
+  inner.BackgroundTransparency = 1; inner.Position = UDim2.new(0,8,0,8)
+  inner.LayoutOrder = 0; inner.AutomaticSize = Enum.AutomaticSize.Y
+  New("UIListLayout",{Parent=inner, SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,6)})
+
+  local titleLbl = Label(inner,"Pilih config yang ingin dihapus:",10,Color3.fromRGB(220,100,100),Enum.Font.GothamBold,Enum.TextXAlignment.Left)
+  titleLbl.Size = UDim2.new(1,0,0,14); titleLbl.LayoutOrder = 0
+
+  local names = ListConfigs()
+  if #names == 0 then
+   local emptyLbl = Label(inner,"Belum ada config tersimpan.",11,C.TXT3,Enum.Font.Gotham,Enum.TextXAlignment.Left)
+   emptyLbl.Size = UDim2.new(1,0,0,20); emptyLbl.LayoutOrder = 1
+  else
+   local listScroll = Instance.new("ScrollingFrame"); listScroll.Parent = inner
+   listScroll.LayoutOrder = 1
+   listScroll.Size = UDim2.new(1,0,0, math.min(#names,5)*38+4)
+   listScroll.CanvasSize = UDim2.new(1,0,0,#names*38+4)
+   listScroll.ScrollBarThickness = 4; listScroll.BackgroundTransparency = 1
+   listScroll.BorderSizePixel = 0
+   New("UIListLayout",{Parent=listScroll, SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,4)})
+
+   local _pendingDel = nil -- nama yang menunggu konfirmasi
+   local _pendingTimer = nil
+
+   for i, n in ipairs(names) do
+    local row, lbl = MakeListItem(listScroll, i, n, function(selName, rowRef, lblRef, arrRef)
+     if _pendingDel == selName then
+      -- Konfirmasi kedua -> hapus
+      if _pendingTimer then pcall(task.cancel, _pendingTimer) end
+      _pendingDel = nil
+      DeleteConfigByName(selName)
+      SetStatus("Dihapus: "..selName, Color3.fromRGB(220,100,100))
+      -- Refresh list
+      task.delay(0.3, OpenDeleteMode)
+     else
+      -- Konfirmasi pertama
+      if _pendingDel then
+       -- Reset item sebelumnya
+       _pendingDel = nil
+       if _pendingTimer then pcall(task.cancel, _pendingTimer) end
+      end
+      _pendingDel = selName
+      lblRef.Text = "YAKIN HAPUS: "..selName.."?"
+      lblRef.TextColor3 = Color3.fromRGB(255,80,80)
+      arrRef.Text = "!"
+      rowRef.BackgroundColor3 = Color3.fromRGB(60,20,20)
+      SetStatus("Klik sekali lagi untuk konfirmasi hapus: "..selName, Color3.fromRGB(255,140,60))
+      -- Auto-cancel setelah 5 detik
+      _pendingTimer = task.delay(5, function()
+       _pendingDel = nil
+       OpenDeleteMode()
+       SetStatus("Hapus dibatalkan (timeout).", C.TXT2)
+      end)
+     end
+    end)
+   end
+  end
+
+  subPanel.AutomaticSize = Enum.AutomaticSize.Y
+  subPanel.Size = UDim2.new(1,0,0,0)
+ end
+
+ -- ── Toggle sub-panel (klik tombol = buka/tutup mode) ─────
+ local function ToggleMode(mode, openFn)
+  if _activeMode == mode then
+   -- Klik tombol yang sama = tutup
+   _activeMode = nil
+   subPanel.Visible = false
+   ClearSub()
+   SetStatus("Panel ditutup.", C.TXT2)
+  else
+   _activeMode = mode
+   openFn()
+  end
+ end
+
+ btnSave.MouseButton1Click:Connect(function()
+  ToggleMode("save", OpenSaveMode)
+ end)
+ btnLoad.MouseButton1Click:Connect(function()
+  ToggleMode("load", OpenLoadMode)
+ end)
+ btnDel.MouseButton1Click:Connect(function()
+  ToggleMode("delete", OpenDeleteMode)
  end)
 
- -- Tampilkan preview awal
- task.defer(RefreshPreview)
+ -- Status awal
+ local _initialNames = ListConfigs()
+ if #_initialNames > 0 then
+  SetStatus(#_initialNames.." config ditemukan di FLaConfigs/.", C.ACC2)
+ else
+  SetStatus("Belum ada config. Klik SAVE untuk membuat.", C.TXT2)
+ end
 
 end -- end do PANEL CONFIG
 
