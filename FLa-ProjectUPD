@@ -1310,6 +1310,9 @@ ASC = {
  _rrIdx            = 0,      -- [v48] Round-robin index untuk Pick Mode Default
  autoKillBoss = false, -- AUTO BOSS KILL toggle
  bossDelay    = 3,     -- delay sebelum TP ke boss (1-10s)
+ listEnabled      = false, -- toggle aktif/nonaktif fitur List Entry ASC
+ listEntries      = {},    -- { {maps={[mn]=true,...}, ranks={[grade]=true,...}} , ... }
+ _listVisitedMaps = {},    -- [mapNum] = true, sudah dikunjungi di siklus ini
  statusLbl = nil,
  dot       = nil,
  suksesLbl = nil,
@@ -1472,6 +1475,9 @@ _ascBossToggleVis      = nil  -- sync visual pill ASC Auto Kill Boss
 _ascBossDelaySet       = nil  -- set ASC boss delay slider + visual
 -- Raid List Entry rebuild
 _raidRebuildListRows   = nil  -- rebuild UI rows dari RAID.listEntries
+-- ASC List Entry rebuild + toggle visual
+_ascRebuildListRows    = nil  -- rebuild UI rows dari ASC.listEntries
+_setAscListEnabledVis  = nil  -- sync visual pill ASC List Entry toggle
 -- HR/WR slot refresh fns (set during panel build)
 -- accessed via _HR_RPT.slotRefreshFns and _WR_RPT.slotRefreshFns
 
@@ -9719,9 +9725,71 @@ function StartAscensionLoop()
  -- MapId masuk ke tower tetap 503xx — tidak diubah di sini
  -- ============================================================
  -- Return: entry (match), nil+"no_tower" (tidak ada tower), nil+"no_match" (ada tower tapi filter tidak cocok)
+ -- ============================================================
+ -- LIST ENTRY ASC: cari tower yang match list, fallback ke Pick Mode
+ -- ============================================================
+ local function ResolveAscEntryFromList()
+  if not ASC.listEnabled then return nil end
+  if #ASC.listEntries == 0 then return nil end
+  local ascList = GetAscensionList()
+  if #ascList == 0 then return nil end
+
+  -- Grade helper
+  local function _getGradeL(r)
+   local g = GetBestGrade(r.mapNum, true)
+   if not g or g == "?" then g = r.grade end
+   return (g and g ~= "?") and g or nil
+  end
+
+  -- Kumpulkan semua tower yang match dari semua entry
+  local function collectAllMatched(skipVisited)
+   local allMatched = {}
+   local seen = {}
+   for i = 1, #ASC.listEntries do
+    local ent = ASC.listEntries[i]
+    local hasMaps  = next(ent.maps)  ~= nil
+    local hasRanks = next(ent.ranks) ~= nil
+    for _, r in ipairs(ascList) do
+     if seen[r.mapNum] then continue end
+     if skipVisited and ASC._listVisitedMaps[r.mapNum] then continue end
+     local mapsOk = (not hasMaps) or ent.maps[r.mapNum]
+     if not mapsOk then continue end
+     if hasRanks then
+      local grade = _getGradeL(r)
+      if grade and ent.ranks[grade] then
+       table.insert(allMatched, r); seen[r.mapNum] = true
+      end
+     else
+      table.insert(allMatched, r); seen[r.mapNum] = true
+     end
+    end
+   end
+   return allMatched
+  end
+
+  -- Tahap 1: cari yang belum dikunjungi
+  local allMatched = collectAllMatched(true)
+  -- Tahap 2: kalau semua sudah dikunjungi -> reset visited dan loop ulang
+  if #allMatched == 0 then
+   for k in pairs(ASC._listVisitedMaps) do ASC._listVisitedMaps[k] = nil end
+   allMatched = collectAllMatched(true)
+  end
+  if #allMatched == 0 then return nil end
+  -- Pilih mapNum terkecil dari semua yang match
+  table.sort(allMatched, function(a, b) return a.mapNum < b.mapNum end)
+  return allMatched[1]
+ end
+
  local function ResolveAscEntry()
   local ascList = GetAscensionList()
   if #ascList == 0 then return nil, "no_tower" end
+
+  -- [LIST ENTRY ASC] Cek List Entry dulu sebelum logika Pick Mode
+  if ASC.listEnabled and #ASC.listEntries > 0 then
+   local listResult = ResolveAscEntryFromList()
+   if listResult then return listResult end
+   -- Tidak ada match -> fallback ke Pick Mode normal (lanjut ke bawah)
+  end
 
   -- Prune expired entries (sama seperti RAID)
   local _now0 = os.time()
@@ -10068,6 +10136,10 @@ function StartAscensionLoop()
     end
 
     local mn = raidEntry.mapNum
+    -- [LIST ENTRY ASC] Tandai tower ini sudah dikunjungi di siklus ini
+    if ASC.listEnabled and #ASC.listEntries > 0 then
+     ASC._listVisitedMaps[mn] = true
+    end
     local bossHint = raidEntry.bossName and (" - "..raidEntry.bossName) or ""
     AscStatusUpdate("Masuk: Tower "..mn..bossHint.." ["..raidEntry.grade.."]", Color3.fromRGB(100,200,255))
 
@@ -10356,6 +10428,7 @@ function StartAscensionLoop()
      local BOSS_KEYS_ASC = {
       "baran","grendal","plague","frostborne","legia",
       "silas","yogumunt","antares","ashborn",
+      -- [CUSTOM] Boss Ascension Tower
      }
      local function IsBossAsc(name)
       local n = name:lower()
@@ -10436,18 +10509,27 @@ function StartAscensionLoop()
      local function _tryAddBoss(obj)
       if boss or not obj:IsA("Model") then return end
       if IsBossAscWithHint(obj.Name) then
+       -- [FIX ZOMBIE] Hard check: MapId wajib dalam range ASC (50301-50326)
+       local _curMap = GetCurrentMapId()
+       if not _curMap or (_curMap < 50301 or _curMap > 50326) then return end
        local g = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid") or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
        local hrp = obj:FindFirstChild("HumanoidRootPart")
        local hum = obj:FindFirstChildOfClass("Humanoid")
-       if g and hrp and hum and hum.Health > 0 then
-        -- [BUG FIX] Validasi jarak 500 studs ke posisi player sebelum set sebagai boss target.
-        local _pp = GetPlayerPos()
-        if _pp and _pp.Magnitude > 1 then
-         if (hrp.Position - _pp).Magnitude > 500 then return end
-        end
-        boss = {guid=g, hrp=hrp, model=obj}
-        _bossFoundViaEvent = true
+       if not (g and hrp and hum) then return end
+       -- [FIX ZOMBIE] Validasi zombie: health, maxhealth, posisi
+       if hum.Health <= 0 then return end
+       if hum.MaxHealth <= 0 then return end
+       local _ap = hrp.Position
+       if _ap.Magnitude <= 10 then return end
+       if _ap.Y < -200 or _ap.Y > 1500 then return end
+       if not hrp:IsDescendantOf(workspace) then return end
+       -- [BUG FIX] Validasi jarak 500 studs ke posisi player sebelum set sebagai boss target.
+       local _pp = GetPlayerPos()
+       if _pp and _pp.Magnitude > 1 then
+        if (_ap - _pp).Magnitude > 500 then return end
        end
+       boss = {guid=g, hrp=hrp, model=obj}
+       _bossFoundViaEvent = true
       end
      end
      -- Pasang ChildAdded di semua folder enemy + scan existing children sekarang
@@ -10531,7 +10613,8 @@ function StartAscensionLoop()
       )
       if headPart and headPart.Parent then
        local p = headPart.Position
-       if p.Y > -200 then return p end
+       -- [FIX ZOMBIE] Tolak: void (Y<-200), langit (Y>1500), posisi default (Magnitude<=10)
+       if p.Y > -200 and p.Y < 1500 and p.Magnitude > 10 then return p end
       end
       return nil
      end
@@ -11006,11 +11089,12 @@ function GetRaidEnemies()
  local refPos = (playerPos and playerPos.Magnitude > 1) and playerPos
             or (spawnPos and spawnPos.Magnitude > 1) and spawnPos
             or nil
- local MAX_DIST = 8000
+ local MAX_DIST = 4000
  local useDistFilter = refPos ~= nil
 
  local function addEnemy(e)
  if not e:IsA("Model") then return end
+ if not e:IsDescendantOf(workspace) then return end
  local g = e:GetAttribute("EnemyGuid") or e:GetAttribute("BossGuid") or e:GetAttribute("Guid") or e:GetAttribute("GUID")
  if not g or seen[g] then return end
  local hrp = e:FindFirstChild("HumanoidRootPart")
@@ -11019,34 +11103,26 @@ function GetRaidEnemies()
        or e:FindFirstChild("UpperTorso")
        or e:FindFirstChildWhichIsA("BasePart")
  local hum = e:FindFirstChildOfClass("Humanoid")
- if not (hrp and hum and hum.Health > 0) then return end
+ if not (hrp and hum) then return end
+ -- [FIX ZOMBIE] Tolak enemy zombie dari map/session sebelumnya
+ if hum.Health <= 0 then return end
+ if hum.MaxHealth <= 0 then return end
+ local _ep = hrp.Position
+ if _ep.Magnitude <= 10 then return end   -- posisi default/zero = zombie
+ if _ep.Y < -200 or _ep.Y > 1500 then return end -- void atau langit = zombie
+ if not hrp:IsDescendantOf(workspace) then return end
  if useDistFilter then
- local dist = (hrp.Position - refPos).Magnitude
+ local dist = (_ep - refPos).Magnitude
  if dist > MAX_DIST then return end
  end
  seen[g] = true
  table.insert(list, {guid=g, hrp=hrp, model=e})
  end
 
- -- Scan folder-folder utama
- for _, fname in ipairs({"Bosses","Boss","RaidBoss","Enemys","Enemy","Enemies","RaidEnemys","Monsters","Monster"}) do
- local folder = workspace:FindFirstChild(fname)
+ -- Scan HANYA folder Enemys di workspace
+ local folder = workspace:FindFirstChild("Enemys")
  if folder then
- for _, e in ipairs(folder:GetChildren()) do addEnemy(e) end
- end
- end
-
- -- [GODMODE FIX] Fallback: scan langsung children workspace jika folder tidak ketemu / list kosong
- if #list == 0 then
- for _, obj in ipairs(workspace:GetChildren()) do
- if obj:IsA("Model") then
- addEnemy(obj)
- -- Scan nested (beberapa game taruh enemy di sub-model)
- for _, child in ipairs(obj:GetChildren()) do
- addEnemy(child)
- end
- end
- end
+  for _, e in ipairs(folder:GetChildren()) do addEnemy(e) end
  end
 
  return list
@@ -12129,7 +12205,7 @@ local function ResolveEntry()
  -- MAX_DIST dinaikkan ke 6000: cukup sempit untuk tolak Siege/Anniversary
  -- (koordinat mereka biasanya >15000 studs dari map RAID).
  local _playerAnchorPos = GetPlayerPos()
- local MAX_DIST_BOSS = 6000
+ local MAX_DIST_BOSS = 2000 -- [FIX ZOMBIE] Diperkecil dari 6000; boss zombie dari map lain umumnya di luar radius ini
  local _anchorValid = _playerAnchorPos and _playerAnchorPos.Magnitude > 10
 
  -- Helper validasi enemy: prinsip "lebih baik lolos false positive daripada blokir boss benar"
@@ -12149,11 +12225,11 @@ local function ResolveEntry()
 
  local BOSS_KEYS_EARLY = {
   "goblin king","giant arachnid buryura","igris",
-  "the leader of the polar bears","arch lich","kargalgan","baran",
-  "beru","giant monarch","monarch of plague","frostborne","legia",
-  "silas","yogumunt",
-  "antares","ashborn","dominion","absolute",
-  "broly","goku[super4]",
+  "leader of the polar bears","beru","baran","kargalgan",
+  "monarch of plague","frostborne","legia",
+  "silas","yogumunt","antares","ashborn",
+  "dominion","absolute","broly","goku[super4]",
+  -- [CUSTOM RAID] Boss keys
  }
  local function IsBossEarly(name)
   local n = name:lower()
@@ -12256,11 +12332,11 @@ local function ResolveEntry()
  if RAID.running and not RAID._raidDone and RAID.autoKillBoss then
   local BOSS_KEYS = {
    "goblin king","giant arachnid buryura","igris",
-   "the leader of the polar bears","arch lich","kargalgan","baran",
-   "beru","giant monarch","monarch of plague","frostborne","legia",
-   "silas","yogumunt",
-   "antares","ashborn","dominion","absolute",
-   "broly","goku[super4]",
+   "leader of the polar bears","beru","baran","kargalgan",
+   "monarch of plague","frostborne","legia",
+   "silas","yogumunt","antares","ashborn",
+   "dominion","absolute","broly","goku[super4]",
+   -- [CUSTOM RAID] Boss keys
   }
   local function IsBoss(name)
    local n = name:lower()
@@ -12293,13 +12369,28 @@ local function ResolveEntry()
   local function _tryAddBoss(obj)
    if boss or _bossScanDone or not obj:IsA("Model") then return end
    if not IsBossWithHint(obj.Name) then return end
+   -- [FIX ZOMBIE] Hard check: MapId wajib dalam range RAID (50101-50120)
+   -- Mencegah boss dari SIEGE/Anniversary dengan nama sama (Giant Arachnid dll)
+   -- ter-detect saat MapId belum/tidak di range RAID
+   local _curMap = GetCurrentMapId()
+   if not _curMap or (_curMap < 50101 or _curMap > 50120) then
+    RaidStatusUpdate("[!] Boss ditolak - bukan RAID map (MapId="..tostring(_curMap)..")", Color3.fromRGB(255,140,0))
+    return
+   end
    local g   = obj:GetAttribute("EnemyGuid") or obj:GetAttribute("BossGuid")
             or obj:GetAttribute("Guid") or obj:GetAttribute("GUID")
    local hrp = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart
             or obj:FindFirstChild("Head") or obj:FindFirstChild("UpperTorso")
             or obj:FindFirstChild("Torso") or obj:FindFirstChildWhichIsA("BasePart")
    local hum = obj:FindFirstChildOfClass("Humanoid")
-   if not (g and hrp and hum and hum.Health > 0) then return end
+   if not (g and hrp and hum) then return end
+   -- [FIX ZOMBIE] Validasi zombie: health, maxhealth, posisi
+   if hum.Health <= 0 then return end
+   if hum.MaxHealth <= 0 then return end
+   local _hp = hrp.Position
+   if _hp.Magnitude <= 10 then return end
+   if _hp.Y < -200 or _hp.Y > 1500 then return end
+   if not hrp:IsDescendantOf(workspace) then return end
    -- [FIX v260] Wajib lulus validasi map + jarak - tolak enemy dari map lain
    if not _isEnemyInThisMap(hrp) then
     RaidStatusUpdate("[!] Tolak enemy luar map: "..obj.Name, Color3.fromRGB(255,140,0))
@@ -12367,14 +12458,15 @@ local function ResolveEntry()
 
   if boss and RAID.running and not RAID._raidDone then
    local bossGuid = boss.guid
-   -- Helper posisi boss: prioritas HRP, validasi Y > -200 (bukan void/jurang)
+   -- Helper posisi boss: prioritas HRP, validasi Y dan Magnitude (anti-zombie/langit)
    local function GetSafeBossPos()
     local part = boss.model:FindFirstChild("HumanoidRootPart")
               or boss.model.PrimaryPart
               or boss.model:FindFirstChild("Head")
     if part and part.Parent then
      local p = part.Position
-     if p.Y > -200 then return p end
+     -- [FIX ZOMBIE] Tolak: void (Y<-200), langit (Y>1500), posisi default (Magnitude<=10)
+     if p.Y > -200 and p.Y < 1500 and p.Magnitude > 10 then return p end
     end
     return nil
    end
@@ -12547,6 +12639,11 @@ local function ResolveEntry()
       if not boss.model or not boss.model.Parent then break end
       local hum2 = boss.model:FindFirstChildOfClass("Humanoid")
       if not hum2 or hum2.Health <= 0 then break end
+      continue
+     end
+     -- [FIX ZOMBIE] Safety net: jangan fire ke posisi aneh (langit/zero) meski lolos GetSafeBossPos
+     if p.Magnitude <= 10 or p.Y > 1500 or p.Y < -200 then
+      PingWait(0.08)
       continue
      end
      task.spawn(function() pcall(function() RaidFireDamage(bossGuid, p) end) end)
@@ -14408,7 +14505,159 @@ do
  end)
 
  -- ============================================================
- -- ROW 12-13: PICK MODE (sama persis dengan AUTO RAID)
+ -- ROW 11b: LIST ENTRY ASC
+ -- ============================================================
+ do
+  -- Header label
+  local ascListHdr = Label(ascInner,"LIST ENTRY",10,C.TXT3,Enum.Font.GothamBold)
+  ascListHdr.LayoutOrder = 12; ascListHdr.Size = UDim2.new(1,0,0,14)
+
+  -- Control card: toggle + save button
+  local ascListCtrlCard = Frame(ascInner, C.SURFACE, UDim2.new(1,0,0,40))
+  ascListCtrlCard.LayoutOrder = 13; Corner(ascListCtrlCard,10); Stroke(ascListCtrlCard,C.BORD,1.5,0.3); Padding(ascListCtrlCard,6,6,10,10)
+  local ascListCtrlRow = Frame(ascListCtrlCard, C.BLACK, UDim2.new(1,0,1,0))
+  ascListCtrlRow.BackgroundTransparency = 1
+
+  local ascListTogLbl = Label(ascListCtrlRow,"List Entry",12,C.TXT,Enum.Font.GothamBold)
+  ascListTogLbl.Size = UDim2.new(0,70,1,0)
+
+  local ascListPill = Btn(ascListCtrlRow, ASC.listEnabled and C.PILL_ON or C.PILL_OFF, UDim2.new(0,48,0,26))
+  ascListPill.Position = UDim2.new(0,76,0.5,-13); Corner(ascListPill,12)
+  local ascListKnob = Frame(ascListPill, ASC.listEnabled and C.KNOB_ON or C.KNOB_OFF, UDim2.new(0,20,0,20))
+  ascListKnob.AnchorPoint = Vector2.new(0,0.5)
+  ascListKnob.Position = ASC.listEnabled and UDim2.new(1,-23,0.5,0) or UDim2.new(0,3,0.5,0)
+  Corner(ascListKnob,10)
+
+  ascListPill.MouseButton1Click:Connect(function()
+   ASC.listEnabled = not ASC.listEnabled
+   local on = ASC.listEnabled
+   TweenService:Create(ascListPill,TweenInfo.new(0.18,Enum.EasingStyle.Quad),{BackgroundColor3=on and C.PILL_ON or C.PILL_OFF}):Play()
+   TweenService:Create(ascListKnob,TweenInfo.new(0.16),{
+    Position=on and UDim2.new(1,-23,0.5,0) or UDim2.new(0,3,0.5,0),
+    BackgroundColor3=on and C.KNOB_ON or C.KNOB_OFF,
+   }):Play()
+   if _ascWakeup then pcall(function() _ascWakeup:Fire() end) end
+  end)
+
+  -- Expose visual setter ke global untuk ApplyConfig
+  _setAscListEnabledVis = function(on)
+   ASC.listEnabled = on
+   TweenService:Create(ascListPill,TweenInfo.new(0.18,Enum.EasingStyle.Quad),{BackgroundColor3=on and C.PILL_ON or C.PILL_OFF}):Play()
+   TweenService:Create(ascListKnob,TweenInfo.new(0.16),{
+    Position=on and UDim2.new(1,-23,0.5,0) or UDim2.new(0,3,0.5,0),
+    BackgroundColor3=on and C.KNOB_ON or C.KNOB_OFF,
+   }):Play()
+  end
+
+  -- Tombol Save Entry
+  local ascSaveBtn = Btn(ascListCtrlRow, C.ACC, UDim2.new(1,-136,1,-4))
+  ascSaveBtn.Position = UDim2.new(0,132,0,2)
+  Corner(ascSaveBtn,7); Stroke(ascSaveBtn,C.ACC2,1,0.3)
+  local ascSaveLbl = Label(ascSaveBtn,"+ Save Entry",11,Color3.fromRGB(255,255,255),Enum.Font.GothamBold,Enum.TextXAlignment.Center)
+  ascSaveLbl.Size = UDim2.new(1,0,1,0)
+
+  -- Scroll container untuk daftar entry
+  local ascListScroll = Instance.new("ScrollingFrame", ascInner)
+  ascListScroll.LayoutOrder = 14
+  ascListScroll.Size = UDim2.new(1,0,0,0)
+  ascListScroll.BackgroundTransparency = 1
+  ascListScroll.BorderSizePixel = 0
+  ascListScroll.ScrollBarThickness = 3
+  ascListScroll.ScrollBarImageColor3 = C.ACC
+  ascListScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+  ascListScroll.CanvasSize = UDim2.new(0,0,0,0)
+  local ascListLayout = New("UIListLayout",{Parent=ascListScroll,SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4)})
+  ascListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+
+  -- Rebuild rows dari ASC.listEntries
+  local function AscBuildEntryRow(entIdx)
+   local ent = ASC.listEntries[entIdx]
+   if not ent then return end
+
+   local rowH = 32
+   local row = Frame(ascListScroll, C.BG3, UDim2.new(1,0,0,rowH))
+   row.LayoutOrder = entIdx; Corner(row,8); Stroke(row,C.BORD,1,0.4)
+
+   -- Label: maps
+   local mapsStr = ""
+   local mList = {}
+   for mn=1,26 do if ent.maps[mn] then table.insert(mList,"T"..mn) end end
+   if #mList > 0 then mapsStr = table.concat(mList,"|") else mapsStr = "Any Tower" end
+   -- Label: ranks
+   local ranksStr = ""
+   local rList = {}
+   for _, g in ipairs(GRADE_LIST or {}) do if ent.ranks[g] then table.insert(rList,g) end end
+   if #rList > 0 then ranksStr = " ["..table.concat(rList,"|").."]" end
+
+   local entLbl = Label(row, mapsStr..ranksStr, 11, C.TXT, Enum.Font.Gotham)
+   entLbl.Size = UDim2.new(1,-36,1,0); entLbl.Position = UDim2.new(0,8,0,0)
+   entLbl.TextTruncate = Enum.TextTruncate.AtEnd
+
+   -- Tombol hapus
+   local delBtn = Btn(row, Color3.fromRGB(180,50,50), UDim2.new(0,24,0,24))
+   delBtn.Position = UDim2.new(1,-28,0.5,-12); Corner(delBtn,6)
+   local delLbl = Label(delBtn,"×",13,Color3.fromRGB(255,255,255),Enum.Font.GothamBold,Enum.TextXAlignment.Center)
+   delLbl.Size = UDim2.new(1,0,1,0)
+
+   local capturedIdx = entIdx
+   delBtn.MouseButton1Click:Connect(function()
+    table.remove(ASC.listEntries, capturedIdx)
+    -- Rebuild semua row
+    for _, ch in ipairs(ascListScroll:GetChildren()) do
+     if ch:IsA("Frame") then ch:Destroy() end
+    end
+    for i = 1, #ASC.listEntries do AscBuildEntryRow(i) end
+    -- Update tinggi scroll
+    local totalH = math.min(#ASC.listEntries * 36, 180)
+    ascListScroll.Size = UDim2.new(1,0,0,totalH)
+    task.defer(ResizeAscBody)
+   end)
+  end
+
+  _ascRebuildListRows = function()
+   for _, ch in ipairs(ascListScroll:GetChildren()) do
+    if ch:IsA("Frame") then ch:Destroy() end
+   end
+   for i = 1, #ASC.listEntries do AscBuildEntryRow(i) end
+   local totalH = math.min(#ASC.listEntries * 36, 180)
+   ascListScroll.Size = UDim2.new(1,0,0,totalH)
+   task.defer(ResizeAscBody)
+  end
+
+  -- Rebuild awal (untuk ApplyConfig)
+  if #ASC.listEntries > 0 then _ascRebuildListRows() end
+
+  -- Tombol Save Entry: snapshot state Pick Mode + preferMaps + runeGrades saat ini
+  ascSaveBtn.MouseButton1Click:Connect(function()
+   -- Snapshot maps dari ASC.preferMaps
+   local snapMaps = {}
+   for mn=1,26 do if ASC.preferMaps[mn] then snapMaps[mn] = true end end
+   -- Snapshot ranks dari ASC.runeGrades
+   local snapRanks = {}
+   for _, g in ipairs(GRADE_LIST or {}) do
+    if ASC.runeGrades[g] then snapRanks[g] = true end
+   end
+   -- Cegah duplikat
+   for _, ent in ipairs(ASC.listEntries) do
+    local dupMap, dupRank = true, true
+    for mn=1,26 do
+     if (snapMaps[mn] ~= nil) ~= (ent.maps[mn] ~= nil) then dupMap = false; break end
+    end
+    for _, g in ipairs(GRADE_LIST or {}) do
+     if (snapRanks[g] ~= nil) ~= (ent.ranks[g] ~= nil) then dupRank = false; break end
+    end
+    if dupMap and dupRank then return end
+   end
+   table.insert(ASC.listEntries, {maps=snapMaps, ranks=snapRanks})
+   AscBuildEntryRow(#ASC.listEntries)
+   local totalH = math.min(#ASC.listEntries * 36, 180)
+   ascListScroll.Size = UDim2.new(1,0,0,totalH)
+   task.defer(ResizeAscBody)
+  end)
+ end -- end LIST ENTRY ASC do block
+
+ -- ============================================================
+ -- ROW 12: PICK MODE (sama persis dengan AUTO RAID)
  -- ============================================================
  local APM_OPTS  = {"Default","By Rank","By Map","Hard","Easy","Manual"}
  local APM_KEYS  = {"default","byrank","bymap","hard","easy","manual"}
@@ -14712,14 +14961,22 @@ local function GetSiegeEnemies()
     local FOLDERS = {"Enemys","EnemyCityRaid","CityRaidEnemys","Enemies","Enemy"}
     local function _add(e)
         if not e:IsA("Model") then return end
+        if not e:IsDescendantOf(workspace) then return end
         local g   = e:GetAttribute("EnemyGuid") or e:GetAttribute("BossGuid")
                  or e:GetAttribute("Guid")       or e:GetAttribute("GUID")
         local h   = e:FindFirstChild("HumanoidRootPart")
         local hum = e:FindFirstChildOfClass("Humanoid")
-        if g and h and hum and hum.Health > 0 and not seen[g] then
-            seen[g] = true
-            table.insert(list, {model=e, guid=g, hrp=h})
-        end
+        if not (g and h and hum) then return end
+        if seen[g] then return end
+        -- [FIX ZOMBIE] Tolak enemy zombie dari map/session sebelumnya
+        if hum.Health <= 0 then return end
+        if hum.MaxHealth <= 0 then return end
+        local p = h.Position
+        if p.Magnitude <= 10 then return end   -- posisi default/zero = zombie
+        if p.Y < -200 or p.Y > 1500 then return end -- void atau langit = zombie
+        if not h:IsDescendantOf(workspace) then return end
+        seen[g] = true
+        table.insert(list, {model=e, guid=g, hrp=h})
     end
     for _, fname in ipairs(FOLDERS) do
         local f = workspace:FindFirstChild(fname)
@@ -16803,7 +17060,7 @@ do
     local scanBtn = Btn(jtpInner, Color3.fromRGB(25,65,45), UDim2.new(1,0,0,36))
     scanBtn.LayoutOrder = 2; Corner(scanBtn,10)
     Stroke(scanBtn, Color3.fromRGB(80,200,120), 1.5, 0.15)
-    local scanLbl = Label(scanBtn,"[SCAN]  SCAN  Player",13,
+    local scanLbl = Label(scanBtn,"[SCAN]Player",13,
         Color3.fromRGB(100,230,150), Enum.Font.GothamBold, Enum.TextXAlignment.Center)
     scanLbl.Size = UDim2.new(1,0,1,0)
 
@@ -16832,7 +17089,7 @@ do
     local joinBtn = Btn(jtpInner, Color3.fromRGB(15,35,110), UDim2.new(1,0,0,40))
     joinBtn.LayoutOrder = 4; Corner(joinBtn,10)
     Stroke(joinBtn, Color3.fromRGB(55,105,255), 2, 0.05)
-    local joinLbl = Label(joinBtn,"[JOIN]  JOIN  ke Tower Map 2",15,
+    local joinLbl = Label(joinBtn,"[JOIN]to Tower Map 2",15,
         Color3.fromRGB(148,195,255), Enum.Font.GothamBold, Enum.TextXAlignment.Center)
     joinLbl.Size = UDim2.new(1,0,1,0)
 
@@ -16911,7 +17168,7 @@ do
 
             JTP_players = found
             _jtpBusy = false
-            scanLbl.Text = "[SCAN]  SCAN  Player (Global Server)"
+            scanLbl.Text = "[SCAN]Player (Global Server)"
 
             if #found == 0 then
                 JTPStat("[!] Tidak ada player lain di server ini.", C.YEL)
@@ -17016,7 +17273,7 @@ do
             end)
 
             JTP_joining = false
-            joinLbl.Text = "[JOIN]  JOIN  ke Tower Map 2"
+            joinLbl.Text = "[JOIN]to Tower Map 2"
             joinLbl.TextColor3 = Color3.fromRGB(148,195,255)
 
             if ok then
@@ -17033,6 +17290,370 @@ do
 
     end -- if p
 end -- do JTP
+
+-- ============================================================
+-- PANEL : JOIN TO RAID PLAYER (UI)
+-- SCAN  = ambil semua player di server
+-- JOIN  = StartLocalPlayerTeleport {hostId, mapId}
+--         mapId auto-detect dari RAID_LIVE (ASC=503xx, Normal=501xx)
+-- ============================================================
+do
+    local p = Panels["autoraid"]
+    if p then
+
+    -- -- State --------------------------------------------------------------
+    local JTR_players = {}   -- { {name, userId} }
+    local JTR_selIdx  = nil
+    local JTR_joining = false
+
+    -- -- Header collapsible ------------------------------------------------
+    local jtrOpen = false
+
+    local jtrHeader = Btn(p, Color3.fromRGB(16, 28, 48), UDim2.new(1,0,0,42))
+    jtrHeader.LayoutOrder = 28; Corner(jtrHeader, 10)
+    Stroke(jtrHeader, Color3.fromRGB(80, 160, 255), 1.5, 0.3)
+
+    local jtrArrow = Label(jtrHeader, ">", 13, Color3.fromRGB(80,160,255), Enum.Font.GothamBold)
+    jtrArrow.Size = UDim2.new(0,22,1,0); jtrArrow.Position = UDim2.new(0,10,0,0)
+
+    local jtrHeaderLbl = Label(jtrHeader, "JOIN TO RAID PLAYER", 14, C.TXT2, Enum.Font.GothamBold)
+    jtrHeaderLbl.Size = UDim2.new(1,-50,1,0); jtrHeaderLbl.Position = UDim2.new(0,34,0,0)
+
+    local jtrBody = Frame(p, C.BG2, UDim2.new(1,0,0,0))
+    jtrBody.LayoutOrder = 29; jtrBody.ClipsDescendants = true
+    Corner(jtrBody, 10); Stroke(jtrBody, Color3.fromRGB(80,160,255), 1.5, 0.25)
+    jtrBody.Visible = false
+
+    local jtrInner = Frame(jtrBody, C.BLACK, UDim2.new(1,-16,0,0))
+    jtrInner.BackgroundTransparency = 1; jtrInner.Position = UDim2.new(0,8,0,8)
+    local jtrLayout = New("UIListLayout", {
+        Parent = jtrInner, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0,6)
+    })
+
+    -- -- Resize helper ------------------------------------------------------
+    local function ResizeJTRBody()
+        task.spawn(function()
+            PingWait(0)
+            jtrLayout:ApplyLayout()
+            local h = jtrLayout.AbsoluteContentSize.Y + 16
+            jtrInner.Size = UDim2.new(1,0,0,h)
+            jtrBody.Size  = UDim2.new(1,0,0,h+16)
+        end)
+    end
+
+    -- -- Toggle slide up/down ----------------------------------------------
+    jtrHeader.MouseButton1Click:Connect(function()
+        jtrOpen = not jtrOpen
+        jtrBody.Visible = jtrOpen
+        jtrArrow.Text = jtrOpen and "v" or ">"
+        if jtrOpen then task.defer(ResizeJTRBody) end
+    end)
+
+    -- -- Info card ----------------------------------------------------------
+    local infoCard = Frame(jtrInner, C.BG3, UDim2.new(1,0,0,0))
+    infoCard.LayoutOrder = 0; infoCard.AutomaticSize = Enum.AutomaticSize.Y; Corner(infoCard, 10)
+    New("UIPadding", {Parent=infoCard,
+        PaddingTop=UDim.new(0,6), PaddingBottom=UDim.new(0,6),
+        PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10)})
+    local infoLbl = Label(infoCard,
+        "WAJIB SCAN-> PILIH PLAYER -> PILIH MAP -> JOIN.\nSETELAH KELUAR WAJIB TEKAN SCAN ULANG.",
+        10, C.TXT3, Enum.Font.Gotham)
+    infoLbl.Size = UDim2.new(1,0,0,0); infoLbl.AutomaticSize = Enum.AutomaticSize.Y
+    infoLbl.TextWrapped = true; infoLbl.LineHeight = 1.3
+
+    -- -- Status bar ---------------------------------------------------------
+    local jtrStatCard = Frame(jtrInner, C.SURFACE, UDim2.new(1,0,0,28))
+    jtrStatCard.LayoutOrder = 1; Corner(jtrStatCard, 10)
+    New("UIPadding", {Parent=jtrStatCard, PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10)})
+    local jtrStatLbl = Label(jtrStatCard, "Tekan SCAN untuk muat daftar player.", 10, C.TXT3, Enum.Font.Gotham)
+    jtrStatLbl.Size = UDim2.new(1,0,1,0)
+    jtrStatLbl.TextTruncate = Enum.TextTruncate.AtEnd
+
+    local function JTRStat(msg, col)
+        pcall(function() jtrStatLbl.Text = msg; jtrStatLbl.TextColor3 = col or C.TXT3 end)
+    end
+
+    -- -- SCAN button --------------------------------------------------------
+    local scanBtn = Btn(jtrInner, Color3.fromRGB(25,45,65), UDim2.new(1,0,0,36))
+    scanBtn.LayoutOrder = 2; Corner(scanBtn, 10)
+    Stroke(scanBtn, Color3.fromRGB(80,160,255), 1.5, 0.15)
+    local scanLbl = Label(scanBtn, "[SCAN]Player", 13,
+        Color3.fromRGB(120,180,255), Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+    scanLbl.Size = UDim2.new(1,0,1,0)
+
+    -- -- Player list box ----------------------------------------------------
+    local listOuter = Frame(jtrInner, C.BG3, UDim2.new(1,0,0,0))
+    listOuter.LayoutOrder = 3; listOuter.AutomaticSize = Enum.AutomaticSize.Y
+    listOuter.Visible = false; Corner(listOuter, 10)
+    Stroke(listOuter, C.BORD, 1.5, 0.5)
+    New("UIPadding", {Parent=listOuter,
+        PaddingTop=UDim.new(0,4), PaddingBottom=UDim.new(0,4),
+        PaddingLeft=UDim.new(0,6), PaddingRight=UDim.new(0,6)})
+
+    local listTitleLbl = Label(listOuter, "Pilih player -> tap untuk select :", 10, C.TXT3, Enum.Font.GothamBold)
+    listTitleLbl.LayoutOrder = 0; listTitleLbl.Size = UDim2.new(1,0,0,20)
+
+    local listInner = Frame(listOuter, C.BLACK, UDim2.new(1,0,0,0))
+    listInner.BackgroundTransparency = 1; listInner.LayoutOrder = 1
+    listInner.AutomaticSize = Enum.AutomaticSize.Y
+    New("UIListLayout", {Parent=listInner, SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,4)})
+
+    local playerRows = {}
+
+    -- -- JOIN button --------------------------------------------------------
+    local joinBtn = Btn(jtrInner, Color3.fromRGB(15,35,110), UDim2.new(1,0,0,40))
+    joinBtn.LayoutOrder = 4; Corner(joinBtn, 10)
+    Stroke(joinBtn, Color3.fromRGB(80,160,255), 2, 0.05)
+    local joinLbl = Label(joinBtn, "[JOIN]to Raid Player", 15,
+        Color3.fromRGB(148,195,255), Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+    joinLbl.Size = UDim2.new(1,0,1,0)
+
+    -- -- Helper: hapus semua row -------------------------------------------
+    local function ClearRows()
+        for _, r in ipairs(playerRows) do pcall(function() r:Destroy() end) end
+        playerRows = {}; JTR_selIdx = nil
+    end
+
+    -- -- Helper: render list player ----------------------------------------
+    local function RenderList()
+        ClearRows()
+        listOuter.Visible = (#JTR_players > 0)
+        for i, entry in ipairs(JTR_players) do
+            local ii = i
+            local row = Btn(listInner, C.SURFACE, UDim2.new(1,0,0,34))
+            row.LayoutOrder = i; Corner(row, 8); Stroke(row, C.BORD, 1.5, 0.65)
+
+            local nLbl = Label(row, entry.name, 11, C.TXT2, Enum.Font.GothamBold)
+            nLbl.Size = UDim2.new(0.6,0,1,0); nLbl.Position = UDim2.new(0,10,0,0)
+            nLbl.TextTruncate = Enum.TextTruncate.AtEnd
+
+            local uLbl = Label(row, "UID: "..tostring(entry.userId), 9, C.TXT3, Enum.Font.Gotham, Enum.TextXAlignment.Right)
+            uLbl.Size = UDim2.new(0.4,-14,1,0); uLbl.Position = UDim2.new(0.6,0,0,0)
+            uLbl.TextTruncate = Enum.TextTruncate.AtEnd
+
+            local dot = Frame(row, Color3.fromRGB(80,180,255), UDim2.new(0,7,0,7))
+            dot.AnchorPoint = Vector2.new(0,0.5); dot.Position = UDim2.new(0,1,0.5,0)
+            Corner(dot,4); dot.Visible = false
+
+            row.MouseButton1Click:Connect(function()
+                JTR_selIdx = ii
+                for j, r2 in ipairs(playerRows) do
+                    local d2 = r2:FindFirstChildOfClass("Frame")
+                    if d2 then d2.Visible = (j == ii) end
+                    r2.BackgroundColor3 = (j == ii) and Color3.fromRGB(14,30,58) or C.SURFACE
+                end
+                JTRStat("[v] Dipilih: "..entry.name.." (hostId="..entry.userId..")", Color3.fromRGB(100,200,255))
+            end)
+
+            table.insert(playerRows, row)
+        end
+        task.defer(ResizeJTRBody)
+    end
+
+    -- -- SCAN logic ---------------------------------------------------------
+    local _jtrBusy = false
+    scanBtn.MouseButton1Click:Connect(function()
+        if _jtrBusy then return end
+        _jtrBusy = true
+        scanLbl.Text = "[...]  Scanning..."
+        JTRStat("[~] Mengambil daftar player di server...", C.YEL)
+        listOuter.Visible = false
+        JTR_selIdx = nil; ClearRows()
+
+        task.spawn(function()
+            local found = {}
+            for _, plr in ipairs(Players:GetPlayers()) do
+                if plr ~= LP then
+                    table.insert(found, {name = plr.Name, userId = plr.UserId})
+                end
+            end
+            JTR_players = found
+            _jtrBusy = false
+            scanLbl.Text = "[SCAN]Player"
+
+            if #found == 0 then
+                JTRStat("[!] Tidak ada player lain di server ini.", C.YEL)
+                listOuter.Visible = false
+                task.defer(ResizeJTRBody)
+            else
+                JTRStat("[OK] "..#found.." player ditemukan. Pilih -> JOIN.", Color3.fromRGB(100,230,150))
+                RenderList()
+            end
+        end)
+    end)
+
+    -- -- State tambahan untuk Ascension -----------------------------------
+    -- -- MapId Selector UI --------------------------------------------------
+    local JTR_mapId  = 50101  -- default: Normal Map 1
+    local JTR_isAsc  = false
+    local JTR_mapNum = 1
+
+    local MAP_NORMAL_BASE = 50101
+    local MAP_NORMAL_MAX  = 20
+    local MAP_ASC_BASE    = 50302  -- ASC selalu mapId 50302
+    local MAP_ASC_MAX     = 18
+
+    local mapSelOuter = Frame(jtrInner, C.BG3, UDim2.new(1,0,0,0))
+    mapSelOuter.LayoutOrder = 4; mapSelOuter.AutomaticSize = Enum.AutomaticSize.Y
+    Corner(mapSelOuter, 10); Stroke(mapSelOuter, Color3.fromRGB(60,120,200), 1.5, 0.45)
+    New("UIPadding", {Parent=mapSelOuter,
+        PaddingTop=UDim.new(0,6), PaddingBottom=UDim.new(0,6),
+        PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8)})
+    New("UIListLayout", {
+        Parent=mapSelOuter, SortOrder=Enum.SortOrder.LayoutOrder,
+        FillDirection=Enum.FillDirection.Vertical, Padding=UDim.new(0,4)
+    })
+
+    local mapSelTitle = Label(mapSelOuter, "Pilih Map Raid Target :", 10, C.TXT3, Enum.Font.GothamBold)
+    mapSelTitle.LayoutOrder = 0; mapSelTitle.Size = UDim2.new(1,0,0,18)
+
+    -- Baris 1: Normal / Ascension toggle
+    local typeRow = Frame(mapSelOuter, C.BLACK, UDim2.new(1,0,0,30))
+    typeRow.BackgroundTransparency = 1; typeRow.LayoutOrder = 1
+
+    local btnNormal = Btn(typeRow, Color3.fromRGB(15,45,110), UDim2.new(0.5,-3,1,0))
+    btnNormal.Position = UDim2.new(0,0,0,0); Corner(btnNormal, 8)
+    Stroke(btnNormal, Color3.fromRGB(80,140,255), 1.5, 0.2)
+    local lblNormal = Label(btnNormal, "Normal Raid", 11, Color3.fromRGB(150,210,255), Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+    lblNormal.Size = UDim2.new(1,0,1,0)
+
+    local btnAsc = Btn(typeRow, Color3.fromRGB(25,15,60), UDim2.new(0.5,-3,1,0))
+    btnAsc.Position = UDim2.new(0.5,3,0,0); Corner(btnAsc, 8)
+    Stroke(btnAsc, Color3.fromRGB(160,80,255), 1.5, 0.55)
+    local lblAsc = Label(btnAsc, "Ascension", 11, Color3.fromRGB(130,80,200), Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+    lblAsc.Size = UDim2.new(1,0,1,0)
+
+    -- Baris 2: < Map/Tower N (xxxxx) > — tampil untuk Normal DAN Ascension
+    local numRow = Frame(mapSelOuter, C.BLACK, UDim2.new(1,0,0,30))
+    numRow.BackgroundTransparency = 1; numRow.LayoutOrder = 2
+
+    local btnMapDec = Btn(numRow, Color3.fromRGB(20,20,40), UDim2.new(0,36,1,0))
+    btnMapDec.Position = UDim2.new(0,0,0,0); Corner(btnMapDec, 8)
+    Stroke(btnMapDec, C.BORD, 1, 0.4)
+    local lblMapDec = Label(btnMapDec, "<", 15, C.TXT, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+    lblMapDec.Size = UDim2.new(1,0,1,0)
+
+    local mapDisplay = Frame(numRow, Color3.fromRGB(10,18,35), UDim2.new(1,-80,1,0))
+    mapDisplay.Position = UDim2.new(0,40,0,0); Corner(mapDisplay, 8)
+    Stroke(mapDisplay, Color3.fromRGB(60,100,180), 1.5, 0.3)
+    local mapDisplayLbl = Label(mapDisplay, "Map 1  (50101)", 11, C.TXT2, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+    mapDisplayLbl.Size = UDim2.new(1,0,1,0)
+
+    local btnMapInc = Btn(numRow, Color3.fromRGB(20,20,40), UDim2.new(0,36,1,0))
+    btnMapInc.Position = UDim2.new(1,-36,0,0); Corner(btnMapInc, 8)
+    Stroke(btnMapInc, C.BORD, 1, 0.4)
+    local lblMapInc = Label(btnMapInc, ">", 15, C.TXT, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+    lblMapInc.Size = UDim2.new(1,0,1,0)
+
+    local function UpdateMapDisplay()
+        if JTR_isAsc then
+            JTR_mapId = 50302  -- ASC selalu mapId 50302
+            mapDisplayLbl.Text = "Tower "..JTR_mapNum
+            mapDisplayLbl.TextColor3 = Color3.fromRGB(200,150,255)
+            Stroke(mapDisplay, Color3.fromRGB(120,60,220), 1.5, 0.3)
+            Stroke(mapSelOuter, Color3.fromRGB(120,60,220), 1.5, 0.3)
+        else
+            JTR_mapId = MAP_NORMAL_BASE + (JTR_mapNum - 1)
+            mapDisplayLbl.Text = "Map "..JTR_mapNum
+            mapDisplayLbl.TextColor3 = Color3.fromRGB(100,190,255)
+            Stroke(mapDisplay, Color3.fromRGB(60,100,180), 1.5, 0.3)
+            Stroke(mapSelOuter, Color3.fromRGB(60,120,200), 1.5, 0.45)
+        end
+    end
+
+    local function SetMapType(isAsc)
+        JTR_isAsc = isAsc
+        -- Clamp mapNum ke range yang sesuai
+        local maxMap = isAsc and MAP_ASC_MAX or MAP_NORMAL_MAX
+        if JTR_mapNum > maxMap then JTR_mapNum = maxMap end
+        btnNormal.BackgroundColor3 = (not isAsc) and Color3.fromRGB(15,45,110) or Color3.fromRGB(12,25,55)
+        lblNormal.TextColor3       = (not isAsc) and Color3.fromRGB(150,210,255) or Color3.fromRGB(70,120,190)
+        btnAsc.BackgroundColor3    = isAsc and Color3.fromRGB(50,20,100) or Color3.fromRGB(20,12,50)
+        lblAsc.TextColor3          = isAsc and Color3.fromRGB(200,150,255) or Color3.fromRGB(100,65,170)
+        UpdateMapDisplay()
+        task.defer(ResizeJTRBody)
+    end
+
+    btnNormal.MouseButton1Click:Connect(function() SetMapType(false) end)
+    btnAsc.MouseButton1Click:Connect(function() SetMapType(true) end)
+    btnMapDec.MouseButton1Click:Connect(function()
+        if JTR_mapNum > 1 then JTR_mapNum = JTR_mapNum - 1; UpdateMapDisplay() end
+    end)
+    btnMapInc.MouseButton1Click:Connect(function()
+        local maxMap = JTR_isAsc and MAP_ASC_MAX or MAP_NORMAL_MAX
+        if JTR_mapNum < maxMap then JTR_mapNum = JTR_mapNum + 1; UpdateMapDisplay() end
+    end)
+
+    SetMapType(false)  -- init: Normal Raid Map 1
+
+    -- JOIN button dipindah LayoutOrder ke 5 (setelah mapSelOuter)
+    joinBtn.LayoutOrder = 5
+
+    -- -- JOIN logic ---------------------------------------------------------
+    joinBtn.MouseButton1Click:Connect(function()
+        if JTR_joining then return end
+        if not JTR_selIdx then
+            JTRStat("[!] Belum ada player yang dipilih!", C.YEL); return
+        end
+        local entry = JTR_players[JTR_selIdx]
+        if not entry then
+            JTRStat("[!] Data tidak valid, coba SCAN ulang.", C.YEL); return
+        end
+
+        -- (tidak perlu validasi raidId untuk Ascension, flow sekarang sama dengan Normal)
+
+        JTR_joining = true
+        joinLbl.Text = "JOINING..."
+        joinLbl.TextColor3 = C.YEL
+
+        task.spawn(function()
+            local mapId   = JTR_mapId
+            local mapType = JTR_isAsc and "ASC" or "NORMAL"
+            JTRStat("[JOIN] -> "..entry.name.." | hostId="..entry.userId.." | mapId="..mapId.." ("..mapType..")", C.YEL)
+
+            local ok, err = pcall(function()
+                local reStartTp = Remotes:FindFirstChild("StartLocalPlayerTeleport")
+                local reEquip   = Remotes:FindFirstChild("EquipHeroWithData")
+                local reTpSucc  = Remotes:FindFirstChild("LocalPlayerTeleportSuccess")
+
+                if not reStartTp then error("Remote StartLocalPlayerTeleport tidak ditemukan!") end
+
+                -- Step 1: StartLocalPlayerTeleport (hostId + mapId only)
+                JTRStat("[1/3] Teleport ke raid "..entry.name.."...", C.YEL)
+                PingGuard()
+                reStartTp:FireServer({hostId = entry.userId, mapId = mapId})
+                PingWait(0.5)
+
+                -- Step 2: EquipHeroWithData
+                if reEquip then pcall(function() reEquip:FireServer() end) end
+                PingWait(0.3)
+
+                -- Step 3: LocalPlayerTeleportSuccess
+                if reTpSucc then
+                    PingGuard()
+                    pcall(function() reTpSucc:InvokeServer() end)
+                end
+            end)
+
+            JTR_joining = false
+            joinLbl.Text = "[JOIN]to Raid Player"
+            joinLbl.TextColor3 = Color3.fromRGB(148,195,255)
+
+            if ok then
+                JTRStat("[OK] Berhasil join "..entry.name.."! (mapId="..mapId..")", Color3.fromRGB(80,220,140))
+                pcall(function() SystemNotify("[OK] Joined Raid: "..entry.name, 4) end)
+            else
+                JTRStat("[ERR] "..(tostring(err):sub(1,60)), Color3.fromRGB(220,80,80))
+                pcall(function() SystemNotify("[ERR] Join Raid gagal!", 3) end)
+            end
+        end)
+    end)
+
+    task.defer(ResizeJTRBody)
+
+    end -- if p
+end -- do JTR
+
 
 -- Pasang listener dungeon segera setelah GUI load (scan state walau toggle OFF)
 task.spawn(function()
@@ -17366,7 +17987,7 @@ do
 
     -- Header
     local annivHeader = Btn(p, Color3.fromRGB(26, 16, 0), UDim2.new(1,0,0,42))
-    annivHeader.LayoutOrder = 28
+    annivHeader.LayoutOrder = 30
     Corner(annivHeader, 10)
     Stroke(annivHeader, Color3.fromRGB(107, 58, 0), 1.5, 0.3)
 
@@ -17389,7 +18010,7 @@ do
 
     -- Body
     local annivBody = Frame(p, Color3.fromRGB(16, 12, 0), UDim2.new(1,0,0,0))
-    annivBody.LayoutOrder = 29
+    annivBody.LayoutOrder = 31
     annivBody.ClipsDescendants = true
     Corner(annivBody, 10)
     Stroke(annivBody, Color3.fromRGB(58, 32, 0), 1.5, 0.25)
@@ -19630,6 +20251,17 @@ do
    local APM_KEYS = {"default","byrank","bymap","hard","easy","manual"}
    for i,k in ipairs(APM_KEYS) do if ASC and k == ASC.pickMode then cfg.ascPMIdx=i; break end end
   end)
+  -- ASC List Entry
+  cfg.ascListEnabled = ASC and ASC.listEnabled or false
+  cfg.ascListEntries = {}
+  if ASC and ASC.listEntries then
+   for i, ent in ipairs(ASC.listEntries) do
+    local saveMaps = {}; local saveRanks = {}
+    for k,v in pairs(ent.maps)  do if v then saveMaps[tostring(k)]  = true end end
+    for k,v in pairs(ent.ranks) do if v then saveRanks[tostring(k)] = true end end
+    cfg.ascListEntries[i] = {maps=saveMaps, ranks=saveRanks}
+   end
+  end
 
   cfg.siegeOn      = _siegeToggleState or false
   cfg.siegeExclude = {}
@@ -19981,6 +20613,22 @@ do
    else
     ASC.bossDelay = cfg.ascBossDelay or 3
    end
+   -- [FIX] Restore ASC List Entry
+   if ASC.listEntries and cfg.ascListEntries then
+    for k in pairs(ASC.listEntries) do ASC.listEntries[k] = nil end
+    for i, ent in ipairs(cfg.ascListEntries) do
+     local maps = {}; local ranks = {}
+     if ent.maps  then for k,v in pairs(ent.maps)  do local n=tonumber(k); if n then maps[n]=true  end end end
+     if ent.ranks then for k,v in pairs(ent.ranks) do ranks[k]=true end end
+     ASC.listEntries[i] = {maps=maps, ranks=ranks}
+    end
+   end
+   if _setAscListEnabledVis then
+    _setAscListEnabledVis(cfg.ascListEnabled == true)
+   else
+    ASC.listEnabled = cfg.ascListEnabled == true
+   end
+   if _ascRebuildListRows then _ascRebuildListRows() end
    task.delay(0.7, function()
     if _setAscToggle then _setAscToggle(cfg.ascOn == true) end
    end)
