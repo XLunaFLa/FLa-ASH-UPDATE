@@ -10400,7 +10400,8 @@ end
 -- ── Webhook mode dropdown stub ────────────────────────────────────────────────
 -- WebhookTab di 2.lua belum punya dropdown mode (By ID / By Name).
 -- Stub simpan index ke _webhookMode agar CollectConfig bisa baca kembali.
-local _WH_MODE_KEYS = {"both", "name", "id"}
+-- PENTING: urutan harus sama persis dengan MODE_KEYS di CollectConfig: {"raid","siege","both"}
+local _WH_MODE_KEYS = {"raid","siege","both"}
 _webhookModeSetIdx = _webhookModeSetIdx or function(idx)
     if _WH_MODE_KEYS[idx] then
         _webhookMode = _WH_MODE_KEYS[idx]
@@ -13104,6 +13105,7 @@ _webhookUrl      = _webhookUrl      or ""
 _webhookUrlBox   = _webhookUrlBox   or nil   -- TextBox reference untuk restore text
 _visWebhookToggle = _visWebhookToggle or nil  -- setter visual-only toggle (fn(bool))
 _setWebhookToggle = _setWebhookToggle or nil  -- setter logic toggle (fn(bool))
+_setWebhookUrlVis = _setWebhookUrlVis or nil  -- setter visual URL textbox (fn(string))
 UpdatePlatformLbl = UpdatePlatformLbl or nil  -- fn() update label platform
 FlushWebhookPending = FlushWebhookPending or nil -- fn() flush buffer webhook
 
@@ -13456,6 +13458,14 @@ do
             if UpdatePlatformLbl then UpdatePlatformLbl() end
         end,
     })
+    -- Expose setter untuk Config restore (update visual textbox)
+    _setWebhookUrlVis = function(url)
+        _webhookUrl = (url or ""):match("^%s*(.-)%s*$") or ""
+        if _urlInputElement then
+            pcall(function() _urlInputElement:Set(_webhookUrl) end)
+        end
+        if UpdatePlatformLbl then pcall(UpdatePlatformLbl) end
+    end
 
     -- ── Platform detect Paragraph ──────────────────────────────────────────
     local _platformParagraph = WebhookTab:Paragraph({
@@ -14271,7 +14281,11 @@ do
         -- ── WEBHOOK TAB ───────────────────────────────────────────────────
         pcall(function()
             _webhookEnabled = cfg.webhookEnabled == true
-            _webhookUrl     = cfg.webhookUrl or ""
+            if _setWebhookUrlVis then
+                _setWebhookUrlVis(cfg.webhookUrl or "")
+            else
+                _webhookUrl = cfg.webhookUrl or ""
+            end
             if _setWebhookToggle  then _setWebhookToggle(cfg.webhookEnabled == true) end
             if _visWebhookToggle  then _visWebhookToggle(cfg.webhookEnabled == true) end
             if _webhookModeSetIdx and cfg.webhookModeIdx then
