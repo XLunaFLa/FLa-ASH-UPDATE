@@ -6223,7 +6223,7 @@ local function ResolveEntry()
      local targetGuid = target.guid
      RaidStatusUpdate("[FLa] Attack: " .. target.model.Name, Color3.fromRGB(255,80,60))
 
-     -- Helper: hitung posisi 5 stud dari musuh ke arah player (sama seperti GetAtkPosF di Farm)
+     -- Helper: hitung posisi 10 stud dari musuh ke arah player (sama seperti GetAtkPosF di Farm)
      local function _getBossAtkPos(enemyHRP)
       local char = LP and LP.Character
       local pHRP = char and char:FindFirstChild("HumanoidRootPart")
@@ -6231,8 +6231,8 @@ local function ResolveEntry()
       local ePos = enemyHRP.Position
       local dir = pHRP.Position - ePos
       local dir2 = Vector3.new(dir.X, 0, dir.Z)
-      if dir2.Magnitude < 0.1 then return ePos + Vector3.new(5,0,0) end
-      return ePos + dir2.Unit * 5
+      if dir2.Magnitude < 0.1 then return ePos + Vector3.new(10,0,0) end
+      return ePos + dir2.Unit * 10
      end
 
      -- Helper: attack 1 target (sama persis FCharF di Farm: FireAttack+FireAllDamage+FireHeroRemotes x2)
@@ -6247,7 +6247,16 @@ local function ResolveEntry()
      end
 
      local _outOfMapCount = 0
+     local _bossTimeout   = false          -- [v5] flag timeout 4 menit
+     local _atkStart      = tick()         -- [v5] waktu mulai attack
+     local BOSS_TIMEOUT   = 240            -- [v5] 4 menit (detik)
      while RAID.running do
+      -- [v5] TIMEOUT: 4 menit tanpa boss mati → anggap sukses, keluar seperti kill normal
+      if tick() - _atkStart >= BOSS_TIMEOUT then
+       _bossTimeout = true
+       RaidStatusUpdate("[T] Boss timeout 4min - Dianggap Sukses, keluar...", Color3.fromRGB(255,200,60))
+       break
+      end
       if _raidServerDone then break end
       local _curMap = GetCurrentMapId()
       if _curMap and (_curMap < 50101 or _curMap > 50120) then
@@ -6283,7 +6292,11 @@ local function ResolveEntry()
      _step4Cleanup()
      _raidSuccess = true
      RAID._raidDone = true
-     RaidStatusUpdate("[FLa] Target Dead!", Color3.fromRGB(100,255,150))
+     if _bossTimeout then
+      RaidStatusUpdate("[T] Timeout 4min - Raid Sukses (forced)", Color3.fromRGB(255,200,60))
+     else
+      RaidStatusUpdate("[FLa] Target Dead!", Color3.fromRGB(100,255,150))
+     end
     end -- if target
    end -- if RAID.running (setelah countdown)
   end -- if _tpTargetPos valid
