@@ -4,8 +4,10 @@
 
     PERILAKU:
     - Begitu di-execute (Auto Execute di executor), Auto Raid langsung ON.
-    - Pick Mode  : EASY (fixed, tidak bisa diganti runtime - List/Manual/Rune/UpDown
-                   sudah dihapus total dari logika ResolveEntry).
+    - Pick Mode  : FIXED MAP 11-15 (hanya masuk raid kalau salah satu dari
+                   Map 11/12/13/14/15 tersedia, RANK tidak diperhitungkan -
+                   List/Manual/Rune/UpDown sudah dihapus total dari logika
+                   ResolveEntry).
     - Auto Boss Kill : ON (default).
     - Boss TP Delay  : 1 detik (default).
     - Tanpa guard cross-feature (Siege/Dungeon/ASC/ST2) - script ini berdiri sendiri.
@@ -27,7 +29,7 @@ local Remotes           = ReplicatedStorage:WaitForChild("Remotes")
 -- CONFIG (default sesuai permintaan - bisa diedit manual di sini)
 -- ============================================================================
 local CONFIG = {
-    pickMode     = "easy",  -- fixed, tidak ada opsi lain
+    pickMode     = "map11to15",  -- fixed, hanya Map 11-15, tidak ada opsi lain
     autoKillBoss = true,    -- Auto Boss Kill default ON
     bossDelay    = 1,       -- delay TP ke boss (detik), default 1
 }
@@ -616,9 +618,9 @@ task.spawn(function()
 end)
 
 -- ============================================================================
--- ResolveEntry - MURNI EASY MODE (Map 1 & 3 diblokir total)
+-- ResolveEntry - HANYA MAP 11-15 (tanpa peduli RANK, asal salah satu tersedia)
 -- ============================================================================
-local EASY_EXCLUDE_MAPS = {[1] = true, [3] = true}
+local ALLOWED_MAPS = {[11] = true, [12] = true, [13] = true, [14] = true, [15] = true}
 
 local function ResolveEntry()
     if #RAID_ID_LIST == 0 then return nil end
@@ -634,17 +636,17 @@ local function ResolveEntry()
     if pruned then RebuildRaidList() end
     if #RAID_ID_LIST == 0 then return nil end
 
-    local easyList = {}
+    local pickList = {}
     for _, r in ipairs(RAID_ID_LIST) do
         local mn = r.mapId - 50000
-        if not EASY_EXCLUDE_MAPS[mn] then
-            table.insert(easyList, r)
+        if ALLOWED_MAPS[mn] then
+            table.insert(pickList, r)
         end
     end
-    if #easyList == 0 then return nil end
+    if #pickList == 0 then return nil end
 
-    table.sort(easyList, function(a, b) return a.mapId < b.mapId end)
-    return easyList[1]
+    table.sort(pickList, function(a, b) return a.mapId < b.mapId end)
+    return pickList[1]
 end
 
 -- ============================================================================
@@ -679,7 +681,7 @@ function StartRaidLoop()
 
     _raidWakeup = Instance.new("BindableEvent")
 
-    Log("Siap. Menunggu raid... (Pick Mode: EASY, Auto Boss Kill: ON, Delay: " .. CONFIG.bossDelay .. "s)")
+    Log("Siap. Menunggu raid... (Pick Mode: MAP 11-15, Auto Boss Kill: ON, Delay: " .. CONFIG.bossDelay .. "s)")
 
     RAID.thread = task.spawn(function()
         pcall(function()
@@ -1146,7 +1148,7 @@ end
 -- ============================================================================
 -- AUTO START (Auto Execute - langsung ON begitu script jalan)
 -- ============================================================================
-Log("Script loaded. Pick Mode = EASY, Auto Boss Kill = ON, Boss TP Delay = " .. CONFIG.bossDelay .. "s")
+Log("Script loaded. Pick Mode = MAP 11-15, Auto Boss Kill = ON, Boss TP Delay = " .. CONFIG.bossDelay .. "s")
 Log("[FLa] Delay start 5 detik...")
 task.wait(5)
 StartRaidLoop()
