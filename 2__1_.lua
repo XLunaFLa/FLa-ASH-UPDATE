@@ -11079,19 +11079,20 @@ _setPetGearX100Toggle= _setPetGearX100Toggle or nil
 StartPG100Loop       = StartPG100Loop       or nil
 StopPG100            = StopPG100            or nil
 
--- PG_GRADES_PER_MACHINE (persis 1.lua baris 3176-3210)
--- R-Pet (980001): 990001-990010 + 990031
--- Y-Pet (980002): 990011-990020 + 990041
--- B-Pet (980003): 990021-990030 + 990051
+-- PG_GRADES_PER_MACHINE (confirmed DEX - includes GM/MM/M++)
+-- R-Pet (980001): 990001-990010 + 990031 + 990032(GM) + 990033(MM) + 990034(M++)
+-- Y-Pet (980002): 990011-990020 + 990041 + 990042(GM) + 990043(MM) + 990044(M++)
+-- B-Pet (980003): 990021-990030 + 990051 + 990052(GM) + 990053(MM) + 990054(M++)
 PG_DRAW_IDS = PG_DRAW_IDS or {980001, 980002, 980003}
 PG_MACHINE_NAMES = PG_MACHINE_NAMES or {"R-Pet Gear", "Y-Pet Gear", "B-Pet Gear"}
-PG_GRADES_PER_MACHINE = {  -- [FIX] selalu overwrite agar grade baru selalu masuk
+PG_GRADES_PER_MACHINE = {  -- selalu overwrite agar grade baru selalu masuk
     -- [1] R-Pet Gear (drawId 980001)
     {
         {id=990001, name="E"}, {id=990002, name="D"}, {id=990003, name="C"},
         {id=990004, name="B"}, {id=990005, name="A"}, {id=990006, name="S"},
         {id=990007, name="SS"}, {id=990008, name="G"}, {id=990009, name="N"},
         {id=990010, name="M"}, {id=990031, name="M+"},
+        {id=990032, name="GM"}, {id=990033, name="MM"}, {id=990034, name="M++"},
     },
     -- [2] Y-Pet Gear (drawId 980002)
     {
@@ -11099,6 +11100,7 @@ PG_GRADES_PER_MACHINE = {  -- [FIX] selalu overwrite agar grade baru selalu masu
         {id=990014, name="B"}, {id=990015, name="A"}, {id=990016, name="S"},
         {id=990017, name="SS"}, {id=990018, name="G"}, {id=990019, name="N"},
         {id=990020, name="M"}, {id=990041, name="M+"},
+        {id=990042, name="GM"}, {id=990043, name="MM"}, {id=990044, name="M++"},
     },
     -- [3] B-Pet Gear (drawId 980003)
     {
@@ -11106,6 +11108,7 @@ PG_GRADES_PER_MACHINE = {  -- [FIX] selalu overwrite agar grade baru selalu masu
         {id=990024, name="B"}, {id=990025, name="A"}, {id=990026, name="S"},
         {id=990027, name="SS"}, {id=990028, name="G"}, {id=990029, name="N"},
         {id=990030, name="M"}, {id=990051, name="M+"},
+        {id=990052, name="GM"}, {id=990053, name="MM"}, {id=990054, name="M++"},
     },
 }
 PG_GRADE_MAP = {}  -- [FIX] selalu overwrite, rebuild dari PG_GRADES_PER_MACHINE
@@ -12662,40 +12665,8 @@ do
         SetupUniversalSpy()
     end
 
-    task.delay(1, function()
-        if InitAllCaptureLayers then InitAllCaptureLayers() end
-    end)
-
-    -- ── [FIX GUID PET GEAR] Wrap InvokeServer langsung di object remote ─────────
-    -- Masalah: __namecall hook kita bisa ditimpa WindUI/library lain yg load setelah
-    -- kita → GUID tidak tertangkap kecuali SimpleSpy aktif (SimpleSpy load terakhir
-    -- sehingga chain melewati hook kita kembali).
-    -- Solusi: wrap method InvokeServer di object RE.RandomPetGearGrade secara langsung
-    -- → tidak bergantung __namecall chain sama sekali, tidak bisa ditimpa library lain.
-    task.delay(2, function()
-        pcall(function()
-            local _remPG = RE.RandomPetGearGrade
-            if not _remPG then return end
-            -- Ambil InvokeServer asli dari object (bukan dari __namecall)
-            local _origInvoke = _remPG.InvokeServer
-            if type(_origInvoke) ~= "function" then return end
-            -- Wrap: intercept setiap InvokeServer pada remote ini
-            _remPG.InvokeServer = newcclosure and newcclosure(function(self, arg1, ...)
-                local r1,r2,r3,r4,r5 = _origInvoke(self, arg1, ...)
-                -- Capture GUID hanya dari panggilan MANUAL player (bukan ourCall)
-                if not _ourCall and type(arg1) == "table" then
-                    pcall(_capturePetGearGuid, arg1)
-                end
-                return r1,r2,r3,r4,r5
-            end) or function(self, arg1, ...)
-                local r1,r2,r3,r4,r5 = _origInvoke(self, arg1, ...)
-                if not _ourCall and type(arg1) == "table" then
-                    pcall(_capturePetGearGuid, arg1)
-                end
-                return r1,r2,r3,r4,r5
-            end
-        end)
-    end)
+    -- [FIX] Jangan pakai task.delay -- hook dipasang di akhir script setelah
+    -- semua panel WindUI selesai dibuat (lihat baris paling akhir file ini)
 
     -- HEARTBEAT POLLER: update UI dari main-thread
     -- SetDesc tidak boleh dipanggil dari __namecall/task.defer thread karena
@@ -14778,3 +14749,16 @@ do
     end
 
 end -- end do PANEL THEME
+
+-- ============================================================================
+-- CAPTURE LAYER INIT (dipasang di sini, SETELAH seluruh WindUI panel selesai)
+-- Alasan: WindUI memasang hook __namecall internalnya saat CreateWindow/Tab.
+-- Dengan pasang hook kita DI SINI (akhir script, synchronous), kita dijamin
+-- jadi yang TERATAS di chain -- tidak ada lagi yang bisa timpa setelah ini.
+-- Realtime: GUID langsung tertangkap saat player reroll 1x manual, tanpa delay.
+-- ============================================================================
+do
+    if InitAllCaptureLayers then
+        InitAllCaptureLayers()
+    end
+end
