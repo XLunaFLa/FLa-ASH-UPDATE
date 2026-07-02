@@ -11085,7 +11085,7 @@ StopPG100            = StopPG100            or nil
 -- B-Pet (980003): 990021-990030 + 990051
 PG_DRAW_IDS = PG_DRAW_IDS or {980001, 980002, 980003}
 PG_MACHINE_NAMES = PG_MACHINE_NAMES or {"R-Pet Gear", "Y-Pet Gear", "B-Pet Gear"}
-PG_GRADES_PER_MACHINE = PG_GRADES_PER_MACHINE or {
+PG_GRADES_PER_MACHINE = {  -- [FIX] selalu overwrite agar grade baru selalu masuk
     -- [1] R-Pet Gear (drawId 980001)
     {
         {id=990001, name="E"}, {id=990002, name="D"}, {id=990003, name="C"},
@@ -11108,7 +11108,7 @@ PG_GRADES_PER_MACHINE = PG_GRADES_PER_MACHINE or {
         {id=990030, name="M"}, {id=990051, name="M+"},
     },
 }
-PG_GRADE_MAP = PG_GRADE_MAP or {}
+PG_GRADE_MAP = {}  -- [FIX] selalu overwrite, rebuild dari PG_GRADES_PER_MACHINE
 for _, _pgl in ipairs(PG_GRADES_PER_MACHINE) do
     for _, _pgg in ipairs(_pgl) do PG_GRADE_MAP[_pgg.id] = _pgg.name end
 end
@@ -12505,6 +12505,22 @@ do
         end
     end
 
+    -- [FIX SCOPE] _capturePetGearGuid diangkat ke level do block agar bisa diakses
+    -- oleh wrap InvokeServer langsung (yang ada di luar SetupUniversalSpy)
+    local function _capturePetGearGuid(arg1)
+        if type(arg1) ~= "table" then return end
+        local g   = arg1.guid
+        local dId = arg1.drawId
+        if not IsValidGUID(g) then return end
+        if type(dId) ~= "number" then return end
+        local si = ({[980001]=1, [980002]=2, [980003]=3})[dId]
+        if si and _PGR_RPT then
+            _PGR_RPT.guids[si]        = g
+            _PGR_RPT.captured[si]     = true
+            _PGR_RPT.needsRefresh[si] = true
+        end
+    end
+
     local function SetupUniversalSpy()
         if _layer0Active then return end
         _layer0Active = true
@@ -12534,22 +12550,7 @@ do
             end
         end
 
-        -- Capture petGearGuid dari arg table ke _PGR_RPT.guids[si] berdasarkan drawId
-        -- (dari 1.lua baris 20055-20070: si ditentukan via drawId, BUKAN guid tunggal,
-        --  karena Pet Gear punya 3 mesin independen dgn GUID masing-masing)
-        local function _capturePetGearGuid(arg1)
-            if type(arg1) ~= "table" then return end
-            local g   = arg1.guid
-            local dId = arg1.drawId
-            if not IsValidGUID(g) then return end
-            if type(dId) ~= "number" then return end
-            local si = ({[980001]=1, [980002]=2, [980003]=3})[dId]
-            if si and _PGR_RPT then
-                _PGR_RPT.guids[si]        = g
-                _PGR_RPT.captured[si]     = true
-                _PGR_RPT.needsRefresh[si] = true
-            end
-        end
+        -- _capturePetGearGuid sudah diangkat ke level do block di atas (scope fix)
 
         local hookOk = false
         pcall(function()
@@ -12663,6 +12664,37 @@ do
 
     task.delay(1, function()
         if InitAllCaptureLayers then InitAllCaptureLayers() end
+    end)
+
+    -- ── [FIX GUID PET GEAR] Wrap InvokeServer langsung di object remote ─────────
+    -- Masalah: __namecall hook kita bisa ditimpa WindUI/library lain yg load setelah
+    -- kita → GUID tidak tertangkap kecuali SimpleSpy aktif (SimpleSpy load terakhir
+    -- sehingga chain melewati hook kita kembali).
+    -- Solusi: wrap method InvokeServer di object RE.RandomPetGearGrade secara langsung
+    -- → tidak bergantung __namecall chain sama sekali, tidak bisa ditimpa library lain.
+    task.delay(2, function()
+        pcall(function()
+            local _remPG = RE.RandomPetGearGrade
+            if not _remPG then return end
+            -- Ambil InvokeServer asli dari object (bukan dari __namecall)
+            local _origInvoke = _remPG.InvokeServer
+            if type(_origInvoke) ~= "function" then return end
+            -- Wrap: intercept setiap InvokeServer pada remote ini
+            _remPG.InvokeServer = newcclosure and newcclosure(function(self, arg1, ...)
+                local r1,r2,r3,r4,r5 = _origInvoke(self, arg1, ...)
+                -- Capture GUID hanya dari panggilan MANUAL player (bukan ourCall)
+                if not _ourCall and type(arg1) == "table" then
+                    pcall(_capturePetGearGuid, arg1)
+                end
+                return r1,r2,r3,r4,r5
+            end) or function(self, arg1, ...)
+                local r1,r2,r3,r4,r5 = _origInvoke(self, arg1, ...)
+                if not _ourCall and type(arg1) == "table" then
+                    pcall(_capturePetGearGuid, arg1)
+                end
+                return r1,r2,r3,r4,r5
+            end
+        end)
     end)
 
     -- HEARTBEAT POLLER: update UI dari main-thread
