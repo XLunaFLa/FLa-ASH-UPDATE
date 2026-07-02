@@ -3603,8 +3603,8 @@ do
         return not h or h.Health <= 0
     end
 
-    --  FireAllDamage (identik 1.lua baris ~2284) 
-    local function FireAllDamage(g, ep)
+    --  FireAllDamage (identik 1.lua baris ~2284, enemyPos dihapus - serang murni via EnemyGUID) 
+    local function FireAllDamage(g)
         if not IsEnemyGuidValid(g) then return end
         if RE.Click then
             task.spawn(function()
@@ -3744,7 +3744,7 @@ do
                     if hrp then
                         local g, p = e.guid, hrp.Position
                         task.spawn(function()
-                            FireAllDamage(g, p)
+                            FireAllDamage(g)
                             FireHeroRemotes(g, p)
                         end)
                     end
