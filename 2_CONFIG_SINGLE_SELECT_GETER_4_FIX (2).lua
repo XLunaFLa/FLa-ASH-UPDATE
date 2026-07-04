@@ -4,8 +4,8 @@
 
     PERILAKU:
     - Begitu di-execute (Auto Execute di executor), Auto Raid langsung ON.
-    - Pick Mode  : FIXED MAP 11-15 (hanya masuk raid kalau salah satu dari
-                   Map 11/12/13/14/15 tersedia, RANK tidak diperhitungkan -
+    - Pick Mode  : FIXED MAP 18-19 (hanya masuk raid kalau salah satu dari
+                   Map 18/19 tersedia, RANK tidak diperhitungkan -
                    List/Manual/Rune/UpDown sudah dihapus total dari logika
                    ResolveEntry).
     - Auto Boss Kill : ON (default).
