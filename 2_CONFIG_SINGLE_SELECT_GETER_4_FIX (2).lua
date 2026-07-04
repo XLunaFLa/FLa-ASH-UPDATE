@@ -620,7 +620,7 @@ end)
 -- ============================================================================
 -- ResolveEntry - HANYA MAP 11-15 (tanpa peduli RANK, asal salah satu tersedia)
 -- ============================================================================
-local ALLOWED_MAPS = {[18] = true, [19] = true, [15] = true, [16] = true, [17] = true}
+local ALLOWED_MAPS = {[18] = true, [19] = true}
 
 local function ResolveEntry()
     if #RAID_ID_LIST == 0 then return nil end
