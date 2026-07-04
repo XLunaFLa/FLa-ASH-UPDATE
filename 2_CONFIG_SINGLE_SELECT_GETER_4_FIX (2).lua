@@ -206,80 +206,89 @@ task.spawn(function()
 end)
 
 -- ============================================================================
--- FireAttack / FireAllDamage / FireHeroRemotes
+-- (FireAttack / FireAllDamage / FireHeroRemotes lama telah digantikan oleh
+-- pola RA+TA hybrid: fireOnce + EnsureHeroAtkThreadFor, persis seperti
+-- AUTO BOSS KILL di 3.lua)
+--
+-- IsEnemyGuidValid - validasi enemy masih ada & hidup (persis pola 3.lua)
 -- ============================================================================
-local _heroFireTick = {}
-
-function FireAttack(g, pos)
-    if not g then return end
-    local atkPos = pos or Vector3.new(0, 0, 0)
-    local char = LP and LP.Character
-    local pHRP = char and char:FindFirstChild("HumanoidRootPart")
-    if pHRP and pos then
-        local dir = (pHRP.Position - pos)
-        local dir2 = Vector3.new(dir.X, 0, dir.Z)
-        if dir2.Magnitude > 0.1 then
-            atkPos = pos + dir2.Unit * 5
-        else
-            atkPos = pos + Vector3.new(1, 0, 0) * 5
-        end
-    end
-    if RE.Atk then pcall(function() RE.Atk:FireServer({attackEnemyGUID = g}) end) end
-    if RE.HeroUseSkill and #HERO_GUIDS > 0 then
-        local now = tick()
-        local last = _heroFireTick[g] or 0
-        if now - last >= 0.04 then
-            _heroFireTick[g] = now
-            for _, hGuid in ipairs(HERO_GUIDS) do
-                pcall(function()
-                    RE.HeroUseSkill:FireServer({heroGuid = hGuid, attackType = 1, userId = MY_USER_ID, enemyGuid = g, targetPos = atkPos})
-                end)
+local function IsEnemyGuidValid(g)
+    if not g then return false end
+    local ENEMY_FOLDERS = {"Enemys", "EnemyCityRaid", "CityRaidEnemys", "Enemies", "Enemy"}
+    for _, folderName in ipairs(ENEMY_FOLDERS) do
+        local f = workspace:FindFirstChild(folderName)
+        if f then
+            for _, e in ipairs(f:GetChildren()) do
+                if e:IsA("Model") and e:GetAttribute("EnemyGuid") == g then
+                    local hrp = e:FindFirstChild("HumanoidRootPart")
+                    local hum = e:FindFirstChildOfClass("Humanoid")
+                    if hrp and hum and hum.Health > 0 then return true end
+                    return false
+                end
             end
         end
     end
+    -- Fallback: nested di workspace.Map.CityRaidEnter (Siege)
+    pcall(function()
+        local mapF = workspace:FindFirstChild("Map")
+        local cre = mapF and mapF:FindFirstChild("CityRaidEnter")
+        if cre then
+            for _, e in ipairs(cre:GetDescendants()) do
+                if e:IsA("Model") and e:GetAttribute("EnemyGuid") == g then
+                    local hrp = e:FindFirstChild("HumanoidRootPart")
+                    local hum = e:FindFirstChildOfClass("Humanoid")
+                    if hrp and hum and hum.Health > 0 then return true end
+                end
+            end
+        end
+    end)
+    return false
 end
 
-function FireAllDamage(g, ep)
+-- ============================================================================
+-- EnsureHeroAtkThreadFor - hero-attack thread per-GUID (persis pola 3.lua)
+-- Dipakai oleh attack loop AUTO BOSS KILL gaya RA+TA hybrid.
+-- ============================================================================
+local _heroAtkThreads = {}
+
+local function EnsureHeroAtkThreadFor(g)
     if not g then return end
-    if RE.Click then
-        task.spawn(function()
-            pcall(function() RE.Click:InvokeServer({enemyGuid = g, enemyPos = ep}) end)
-        end)
-    end
-    if RE.Atk then
-        pcall(function() RE.Atk:FireServer({attackEnemyGUID = g}) end)
-    end
-    if RE.HeroUseSkill and #HERO_GUIDS > 0 then
-        for _, hGuid in ipairs(HERO_GUIDS) do
-            pcall(function() RE.HeroUseSkill:FireServer({heroGuid = hGuid, attackType = 1, userId = MY_USER_ID, enemyGuid = g}) end)
-            pcall(function() RE.HeroUseSkill:FireServer({heroGuid = hGuid, attackType = 2, userId = MY_USER_ID, enemyGuid = g}) end)
-            pcall(function() RE.HeroUseSkill:FireServer({heroGuid = hGuid, attackType = 3, userId = MY_USER_ID, enemyGuid = g}) end)
+    if _heroAtkThreads[g] and _heroAtkThreads[g].running then return end
+    local handle = {running = true, tick = 0}
+    _heroAtkThreads[g] = handle
+    task.spawn(function()
+        local _lastFire = {}
+        while handle.running do
+            if #HERO_GUIDS > 0 and (tick() - handle.tick) >= 0.5 and IsEnemyGuidValid(g) then
+                handle.tick = tick()
+                local _char = LP and LP.Character
+                local _pHRP = _char and _char:FindFirstChild("HumanoidRootPart")
+                local _pPos = _pHRP and _pHRP.Position or Vector3.new(0, 0, 0)
+                for _, hGuid in ipairs(HERO_GUIDS) do
+                    local last = _lastFire[hGuid] or 0
+                    if (tick() - last) >= 0.05 then
+                        _lastFire[hGuid] = tick()
+                        if RE.HeroUseSkill then
+                            pcall(function() RE.HeroUseSkill:FireServer({heroGuid = hGuid, attackType = 1, userId = MY_USER_ID, enemyGuid = g}) end)
+                            task.wait(0.1)
+                            pcall(function() RE.HeroUseSkill:FireServer({heroGuid = hGuid, attackType = 2, userId = MY_USER_ID, enemyGuid = g}) end)
+                            task.wait(0.1)
+                            pcall(function() RE.HeroUseSkill:FireServer({heroGuid = hGuid, attackType = 3, userId = MY_USER_ID, enemyGuid = g}) end)
+                        end
+                    end
+                    task.wait(0.05)
+                end
+            end
+            task.wait(0.05)
+            if not IsEnemyGuidValid(g) then
+                handle.running = false
+            end
         end
-    elseif RE.HeroSkill and #HERO_GUIDS > 0 then
-        for _, hGuid in ipairs(HERO_GUIDS) do
-            pcall(function() RE.HeroSkill:FireServer({heroGuid = hGuid, enemyGuid = g, skillType = 1, masterId = MY_USER_ID}) end)
-            pcall(function() RE.HeroSkill:FireServer({heroGuid = hGuid, enemyGuid = g, skillType = 2, masterId = MY_USER_ID}) end)
-            pcall(function() RE.HeroSkill:FireServer({heroGuid = hGuid, enemyGuid = g, skillType = 3, masterId = MY_USER_ID}) end)
-        end
-    end
+        _heroAtkThreads[g] = nil
+    end)
 end
 
-function FireHeroRemotes(enemyGuid, enemyPos)
-    local pos = enemyPos or Vector3.new(0, 0, 0)
-    if #HERO_GUIDS == 0 then return end
-    local posInfos = {}
-    for _, hGuid in ipairs(HERO_GUIDS) do
-        table.insert(posInfos, {heroGuid = hGuid, targetPos = pos})
-    end
-    if RE.HeroMove then
-        pcall(function() RE.HeroMove:FireServer({attackTarget = enemyGuid, userId = MY_USER_ID, heroTagetPosInfos = posInfos}) end)
-        pcall(function() RE.HeroMove:FireServer({attackTarget = enemyGuid, userId = MY_USER_ID, heroTagetPosInfos = posInfos}) end)
-    end
-end
 
--- ============================================================================
--- GetRaidEnemies - scan musuh aktif di workspace
--- ============================================================================
 function GetRaidEnemies()
     local list = {}
     local seen = {}
@@ -1028,25 +1037,43 @@ function StartRaidLoop()
                                     local targetGuid = target.guid
                                     Log("[FLa] Attack: " .. target.model.Name)
 
-                                    local function getBossAtkPos(enemyHRP)
-                                        local char = LP and LP.Character
-                                        local pHRP = char and char:FindFirstChild("HumanoidRootPart")
-                                        if not pHRP or not enemyHRP then return enemyHRP and enemyHRP.Position or tpTargetPos end
-                                        local ePos = enemyHRP.Position
-                                        local dir = pHRP.Position - ePos
-                                        local dir2 = Vector3.new(dir.X, 0, dir.Z)
-                                        if dir2.Magnitude < 0.1 then return ePos + Vector3.new(10, 0, 0) end
-                                        return ePos + dir2.Unit * 10
+                                    -- [RA+TA HYBRID] Attack loop pakai mekanisme asli RA & TA
+                                    -- (RE.Atk + RE.Click + EnsureHeroAtkThreadFor), BUKAN
+                                    -- FireAttack/FireAllDamage/FireHeroRemotes.
+                                    -- Tahap 1 (RA-style): fire ke GUID musuh RANDOM dari radius 50 studs.
+                                    -- Tahap 2 (TA-style): fire ke GUID boss hasil scan, DIKUNCI terus
+                                    --   tiap loop sampai target itu mati.
+                                    local function fireOnce(guid)
+                                        if not guid then return end
+                                        if RE.Atk then
+                                            pcall(function() RE.Atk:FireServer({attackEnemyGUID = guid}) end)
+                                        end
+                                        if RE.Click then
+                                            task.spawn(function()
+                                                pcall(function() RE.Click:InvokeServer({enemyGuid = guid}) end)
+                                            end)
+                                        end
+                                        EnsureHeroAtkThreadFor(guid)
+                                    end
+
+                                    local function pickRandomGuidNearby(excludeGuid)
+                                        local pool = {}
+                                        for _, e in ipairs(GetRaidEnemies()) do
+                                            local hum = e.model:FindFirstChildOfClass("Humanoid")
+                                            if hum and hum.Health > 0 and e.hrp and e.hrp.Parent then
+                                                local d = (e.hrp.Position - tpTargetPos).Magnitude
+                                                if d <= TP_SCAN_RADIUS then table.insert(pool, e) end
+                                            end
+                                        end
+                                        if #pool == 0 then return excludeGuid end
+                                        local pick = pool[math.random(1, #pool)]
+                                        return pick.guid
                                     end
 
                                     local function attackBoss(guid, enemyHRP)
-                                        local atkPos = getBossAtkPos(enemyHRP)
-                                        FireAttack(guid, atkPos)
-                                        FireAllDamage(guid, atkPos)
-                                        FireHeroRemotes(guid, atkPos)
-                                        FireAttack(guid, atkPos)
-                                        FireAllDamage(guid, atkPos)
-                                        FireHeroRemotes(guid, atkPos)
+                                        local raGuid = pickRandomGuidNearby(guid)
+                                        fireOnce(raGuid)
+                                        fireOnce(guid)
                                     end
 
                                     local outOfMapCount = 0
@@ -1075,7 +1102,7 @@ function StartRaidLoop()
                                         local hum = target.model:FindFirstChildOfClass("Humanoid")
                                         if not hum or hum.Health <= 0 then break end
                                         if not target.hrp or not target.hrp.Parent then
-                                            PG_Wait(0.1)
+                                            task.wait() -- [TA-STYLE] no-delay, sama seperti TA
                                         else
                                             local nearNow = scanNearbyEnemy()
                                             if nearNow and nearNow.guid ~= targetGuid then
@@ -1084,7 +1111,7 @@ function StartRaidLoop()
                                                 Log("[FLa] Target baru: " .. target.model.Name)
                                             end
                                             pcall(function() attackBoss(targetGuid, target.hrp) end)
-                                            PG_Wait(0.1)
+                                            task.wait() -- [TA-STYLE] no-delay, sama seperti TA (bukan PG_Wait(0.1))
                                         end
                                     end
 
