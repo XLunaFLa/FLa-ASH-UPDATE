@@ -56,6 +56,26 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService        = game:GetService("RunService")
 local LP                = Players.LocalPlayer
 
+-- ============================================================================
+-- [PERF] FETCH WINDUI PARALEL (dimulai paling awal, sebelum WaitForChild
+-- remote di bawah). HttpGet jalan di thread terpisah lewat task.spawn,
+-- jadi selagi thread utama nunggu PlayerGui/Remotes/dll, network request
+-- WindUI sudah jalan bareng2 -- bukan antre bergantian kayak versi lama.
+-- Hasil (module WindUI atau error) ditampung di _WindUIFetch, dan baru
+-- di-"join" (ditunggu) tepat sebelum CreateWindow dipanggil nanti.
+-- Tidak ada perubahan pada CARA WindUI dipakai, cuma KAPAN fetch-nya mulai.
+-- ============================================================================
+local _WindUIFetch = { done = false, ok = false, module = nil, err = nil }
+task.spawn(function()
+    local ok, result = pcall(function()
+        return loadstring(game:HttpGet("https://raw.githubusercontent.com/mhankbe/WindUi/refs/heads/main/dist/main.lua"))()
+    end)
+    _WindUIFetch.ok     = ok
+    _WindUIFetch.module = ok and result or nil
+    _WindUIFetch.err    = (not ok) and result or nil
+    _WindUIFetch.done   = true
+end)
+
 local PG                = LP:WaitForChild("PlayerGui", 30)
 if not PG then
     error("[FLa] PlayerGui tidak ketemu dalam 30 detik - coba execute ulang setelah masuk game sepenuhnya.")
@@ -182,20 +202,23 @@ RE.HeroSkill        = RE.HeroSkill        or Remotes:FindFirstChild("HeroPlaySki
 RE.HeroUseSkill     = RE.HeroUseSkill     or Remotes:FindFirstChild("HeroUseSkill")
 RE.StartTp          = RE.StartTp          or Remotes:FindFirstChild("StartLocalPlayerTeleport")
 RE.LocalTp          = RE.LocalTp          or Remotes:FindFirstChild("LocalPlayerTeleport")
--- Hero Fastroll remotes
-RE.RandomHeroQuirk  = RE.RandomHeroQuirk  or Remotes:WaitForChild("RandomHeroQuirk", 10)
-RE.AutoHeroQuirk    = RE.AutoHeroQuirk    or Remotes:WaitForChild("AutoRandomHeroQuirk", 10)
--- Weapon Fastroll remotes
-RE.RandomWeaponQuirk = RE.RandomWeaponQuirk or Remotes:WaitForChild("RandomWeaponQuirk", 10)
-RE.AutoWeaponQuirk   = RE.AutoWeaponQuirk   or Remotes:WaitForChild("AutoRandomWeaponQuirk", 15)
--- Pet Gear Fastroll remotes (remote literal-nya bernama "RandomHeroEquipGrade" / "AutoRandomHeroEquipGrade"
--- meski dipakai untuk Pet Gear, bukan Hero - confirmed sniff 1.lua baris 460 & 3428)
-RE.RandomPetGearGrade = RE.RandomPetGearGrade or Remotes:WaitForChild("RandomHeroEquipGrade", 10)
-RE.AutoPetGearGrade    = RE.AutoPetGearGrade    or Remotes:WaitForChild("AutoRandomHeroEquipGrade", 15)
--- Halo Gacha remote (RemoteFunction)
-RE.RerollHalo          = RE.RerollHalo          or Remotes:FindFirstChild("RerollHalo")
--- Ornament Roll remote (RemoteFunction)
-RE.RerollOrnament      = RE.RerollOrnament      or Remotes:WaitForChild("RerollOrnament", 15)
+-- ============================================================================
+-- [PERF] REROLL REMOTES -> LAZY RESOLVE
+-- 6 remote di bawah (Hero/Weapon/PetGear Fastroll + Halo + Ornament) cuma
+-- dipakai di fitur Reroll (baris ~12887-14571), jauh di bawah sini. Daripada
+-- WaitForChild semuanya di awal script (nunggu 10-15 detik masing2 kalau
+-- server telat bikin remote-nya, padahal user belum tentu buka tab Reroll),
+-- kita resolve baru saat PERTAMA KALI dibutuhkan lewat ResolveRE().
+-- Pola RE.X = RE.X or ... yang lama TETAP terjaga (idempotent, aman dipanggil
+-- berkali-kali), cuma titik eksekusinya dipindah ke titik pakai. Fitur lain
+-- (CollectItem/ExtraReward/dll di bawah) TIDAK disentuh, tetap eager seperti
+-- semula karena bisa aktif dari awal (instant collector / gold magnet).
+-- ============================================================================
+function ResolveRE(key, remoteName, timeout)
+    if RE[key] then return RE[key] end
+    RE[key] = Remotes:WaitForChild(remoteName, timeout or 10)
+    return RE[key]
+end
 
 -- ============================================================================
 -- GLOBAL: SafeReequipAfterTeleport
@@ -226,7 +249,17 @@ function SafeReequipAfterTeleport(tag)
 end
 
 --  LOAD WINDUI (VIA GITHUB - loadstring) 
-local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/mhankbe/WindUi/refs/heads/main/dist/main.lua"))()
+-- [PERF] Fetch-nya udah DIMULAI dari baris paling atas script (paralel sama
+-- semua WaitForChild remote di atas). Di titik ini kita cuma nunggu hasilnya
+-- kalau ternyata belum selesai -- jadi total waktu tunggu = MAX(waktu fetch
+-- WindUI, waktu semua WaitForChild), bukan JUMLAH keduanya kayak sebelumnya.
+while not _WindUIFetch.done do
+    task.wait()
+end
+if not _WindUIFetch.ok then
+    error("[FLa] Gagal fetch/load WindUI dari GitHub: " .. tostring(_WindUIFetch.err))
+end
+local WindUI = _WindUIFetch.module
 if type(WindUI) ~= "table" then
     error("[FLa] WindUI (loadstring GitHub) tidak mengembalikan modul yang valid (type = " .. type(WindUI) .. ").")
 end
@@ -2771,6 +2804,17 @@ do
     -- (yang menangani SkillEffectContainer/Anims), ini menyasar Animator milik
     -- karakter musuh itu sendiri supaya track animasi tidak menumpuk (>64 limit)
     -- dan menghemat memory saat RA/TA/FASTATTACK menyerang enemy berkali-kali.
+    --
+    -- [PATCH PERF] Diperluas supaya juga mematikan ParticleEmitter/Trail/Beam
+    -- yang muncul langsung di dalam model musuh (workspace.Enemys.<Model>.*).
+    -- Sebelumnya objek ini TIDAK PERNAH dibersihkan oleh BlockSkillEffects
+    -- (yang cuma menyasar folder SkillEffectContainer/Anims terpisah), jadi
+    -- saat RA+TA+Hero menyerang 1 target bersamaan, partikel hit-effect
+    -- (mis. lingkaran merah) menumpuk terus di dalam model musuh REAL tanpa
+    -- pernah dibersihkan -> inilah akar penyebab FPS anjlok saat 3 fitur
+    -- (RA -> clone, TA -> real, Fast Attack 1 Enemy) aktif bersamaan.
+    -- Scope: mematikan SEMUA ParticleEmitter/Trail/Beam di workspace.Enemys
+    -- tanpa filter (termasuk aura/efek skill musuh lain), sesuai konfirmasi.
     local function BlockEnemyHitAnim(on)
         if on == _enemyAnimBlocked then return end
         _enemyAnimBlocked = on
@@ -2779,7 +2823,7 @@ do
             if not enemysFolder then return end
 
             if on then
-                -- Stop semua track yang sedang jalan sekarang
+                -- Stop semua track yang sedang jalan sekarang + matikan partikel yang sudah ada
                 for _, desc in ipairs(enemysFolder:GetDescendants()) do
                     if desc:IsA("Animator") then
                         pcall(function()
@@ -2787,9 +2831,14 @@ do
                                 track:Stop(0)
                             end
                         end)
+                    elseif desc:IsA("ParticleEmitter") or desc:IsA("Trail") or desc:IsA("Beam") then
+                        pcall(function()
+                            desc.Enabled = false
+                            if desc:IsA("ParticleEmitter") then desc:Clear() end
+                        end)
                     end
                 end
-                -- Listener: setiap Animator baru yang muncul (enemy baru di-spawn)
+                -- Listener: setiap Animator/Particle baru yang muncul (enemy baru di-spawn, atau hit-effect baru)
                 table.insert(_enemyAnimConns, enemysFolder.DescendantAdded:Connect(function(desc)
                     if not _enemyAnimBlocked then return end
                     if desc:IsA("Animator") then
@@ -2797,6 +2846,11 @@ do
                             if not _enemyAnimBlocked then return end
                             pcall(function() track:Stop(0) end)
                         end))
+                    elseif desc:IsA("ParticleEmitter") or desc:IsA("Trail") or desc:IsA("Beam") then
+                        pcall(function()
+                            desc.Enabled = false
+                            if desc:IsA("ParticleEmitter") then desc:Clear() end
+                        end)
                     end
                 end))
                 -- Listener: pasang juga di Animator yang sudah ada sekarang,
@@ -2814,6 +2868,12 @@ do
                     pcall(function() c:Disconnect() end)
                 end
                 _enemyAnimConns = {}
+                -- Nyalakan lagi semua partikel yang sempat dimatikan
+                for _, desc in ipairs(enemysFolder:GetDescendants()) do
+                    if desc:IsA("ParticleEmitter") or desc:IsA("Trail") or desc:IsA("Beam") then
+                        pcall(function() desc.Enabled = true end)
+                    end
+                end
             end
         end)
     end
@@ -7952,19 +8012,12 @@ function ResolveAscEntry()
    local valid_asc = {}
    local hasPreferMaps = next(ASC.preferMaps or {}) ~= nil
 
-   -- Helper: fallback terakhir -> Tower termurah dalam rentang Map 1-16 dari ascList
-   -- (dipakai kalau List Entry + filter Manual sama sekali tidak ada yg match)
-   local function fallbackLowest1to16()
-    local low16 = {}
-    for _, r in ipairs(ascList) do
-     if r.mapNum >= 1 and r.mapNum <= 16 then table.insert(low16, r) end
-    end
-    if #low16 == 0 then return nil end
-    table.sort(low16, function(a, b) return a.mapNum < b.mapNum end)
-    return low16[1]
-   end
-
-   -- Tahap 0: kumpulkan kandidat, filter PreferMap jika di-set
+   -- [FIX] Tahap 0: kumpulkan kandidat, filter PreferMap jika di-set.
+   -- Kalau Preferred Map diset dan TIDAK ADA yang cocok -> STOP di sini,
+   -- return no_match murni. TIDAK boleh diam-diam fallback ke Map lain
+   -- (itu yang bikin script "nyasar" masuk map yang user tidak pilih).
+   -- Fallback EASY (Map 1-10, rank bebas) HANYA terjadi di paling akhir
+   -- fungsi ini, sebagai langkah terpisah - bukan disembunyikan di sini.
    for _, r in ipairs(ascList) do
     local mn = r.mapNum
     if not hasPreferMaps or ASC.preferMaps[mn] then
@@ -7972,13 +8025,8 @@ function ResolveAscEntry()
     end
    end
    if #valid_asc == 0 then
-    -- Preferred Map diset tapi tidak ada yg cocok -> fallback terakhir ke Map 1-16 termurah
-    local fb = fallbackLowest1to16()
-    if fb then
-     ASC.manualMatchMode = "fallback_1to16"
-     return fb
-    end
-    return nil, "no_match"  -- ada tower tapi tidak ada yg cocok preferMaps, dan Map 1-16 pun kosong
+    ASC.manualMatchMode = "none"
+    return nil, "no_match"
    end
 
    -- Helper sort
@@ -8008,17 +8056,17 @@ function ResolveAscEntry()
      ASC.manualMatchMode = "primary"
      return matched[1]
     end
-    -- Rank diset tapi tidak ada tower yang cocok -> fallback terakhir ke Map 1-16 termurah
-    local fb = fallbackLowest1to16()
-    if fb then
-     ASC.manualMatchMode = "fallback_1to16"
-     return fb
-    end
+    -- [FIX] Rank diset tapi tidak ada tower yang cocok -> STOP, no_match murni.
+    -- Sebelumnya di sini ada fallback diam2 ke Map 1-16 rank bebas -- itu akar
+    -- masalah kenapa Rune Map bisa "nyasar" masuk ke tower yang rank-nya tidak
+    -- dipilih user. Sekarang: kalau Rank tidak match, manual mode GAGAL total.
     ASC.manualMatchMode = "none"
     return nil, "no_match"
    end
 
    -- Tidak ada Preferred Rank diset -> fallback ke tower terkecil dari kandidat
+   -- (ini beda kasus: user memang tidak set Preferred Rank sama sekali, jadi
+   -- rank apapun sah-sah saja selama Map-nya match Preferred Map / semua Map)
    ASC.manualMatchMode = "fallback"
    table.sort(valid_asc, function(a, b) return a.mapNum < b.mapNum end)
    return valid_asc[1]
@@ -8049,6 +8097,29 @@ function ResolveAscEntry()
 
   return pickByDiff(ascList)
  end
+
+-- ============================================================================
+-- [FIX v2] FALLBACK EASY FINAL (Map 1-10, rank bebas)
+-- Dipanggil setelah ResolveAscEntry() gagal total (return nil, "no_match"),
+-- TANPA PEDULI status RAID Normal. Prioritas: Fallback EASY dicoba DULUAN --
+-- baru kalau Fallback EASY juga gagal (tidak ada ASC di Map 1-10 sama sekali),
+-- barulah ASC mundur dan kasih giliran ke RAID Normal (kalau RAID.running).
+-- Ini menggantikan fallback 1-16 lama yang dulu tersembunyi di dalam blok
+-- Manual -- sekarang eksplisit, terpisah, dan konsisten dipakai di semua
+-- titik pemanggilan ResolveAscEntry (bukan cuma di satu tempat).
+-- ============================================================================
+function ResolveAscEntryFallbackEasy()
+ local ascList = GetAscensionList()
+ if #ascList == 0 then return nil end
+ local low10 = {}
+ for _, r in ipairs(ascList) do
+  if r.mapNum >= 1 and r.mapNum <= 10 then table.insert(low10, r) end
+ end
+ if #low10 == 0 then return nil end
+ table.sort(low10, function(a, b) return a.mapNum < b.mapNum end)
+ ASC.manualMatchMode = "fallback_easy"
+ return low10[1]
+end
 
 -- [FIX BUG] ResolveAscTargetMapId tertinggal saat port (asalnya di 1.lua baris 1697,
 -- di luar range StartAscensionLoop yang diekstrak) - tanpa ini, StartAscensionLoop
@@ -8121,7 +8192,20 @@ function StartAscensionLoop()
     -- [v48] Resolve entry berdasarkan Pick Mode
     local raidEntry, _ascReason = ResolveAscEntry()
 
-    -- [FALLBACK FIX] Jika ada tower tapi filter tidak match + RAID.running -> fallback ke RAID siklus ini
+    -- [FIX v2] Prioritas dibalik: Fallback EASY (Map 1-10, rank bebas) DICOBA
+    -- DULUAN kalau List Entry + Manual gagal total. Baru kalau Fallback EASY
+    -- juga tidak ada hasil (tidak ada ASC apapun di Map 1-10 saat ini), barulah
+    -- ASC mundur dan kasih giliran ke RAID Normal (kalau RAID.running).
+    if not raidEntry and _ascReason == "no_match" then
+     local _fbEasy = ResolveAscEntryFallbackEasy and ResolveAscEntryFallbackEasy()
+     if _fbEasy then
+      raidEntry = _fbEasy
+      AscStatusUpdate("[Fallback Easy] Filter tidak match -> Tower "..raidEntry.mapNum.." (Map 1-10)...", Color3.fromRGB(80,180,255))
+     end
+    end
+
+    -- [FALLBACK FIX] Fallback EASY juga gagal (tidak ada ASC di Map 1-10) +
+    -- RAID.running -> giliran Auto Raid Normal siklus ini
     if not raidEntry and _ascReason == "no_match" and RAID and RAID.running then
      AscStatusUpdate("[Fallback] Filter tidak match - giliran Auto Raid siklus ini...", Color3.fromRGB(140,80,200))
      if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
@@ -8226,8 +8310,16 @@ function StartAscensionLoop()
      else
       local _re2, _reason2 = ResolveAscEntry()
       raidEntry = _re2
-      -- Jika ada tower tapi filter tidak match dan RAID running -> fallback ke RAID
-      if not _re2 and _reason2 == "no_match" and RAID and RAID.running then
+      -- [FIX v2] Fallback EASY DICOBA DULUAN kalau no_match, tanpa peduli RAID.running
+      if not raidEntry and _reason2 == "no_match" then
+       local _fbEasy2 = ResolveAscEntryFallbackEasy and ResolveAscEntryFallbackEasy()
+       if _fbEasy2 then
+        raidEntry = _fbEasy2
+        AscStatusUpdate("[Fallback Easy] Filter tidak match -> Tower "..raidEntry.mapNum.." (Map 1-10)...", Color3.fromRGB(80,180,255))
+       end
+      end
+      -- Fallback EASY juga gagal (tidak ada ASC di Map 1-10) + RAID running -> giliran RAID
+      if not raidEntry and _reason2 == "no_match" and RAID and RAID.running then
        AscStatusUpdate("[Fallback] Filter tidak match - giliran Auto Raid...", Color3.fromRGB(140,80,200))
        if _raidWakeup then pcall(function() _raidWakeup:Fire() end) end
        _eventOwner = "raid"
@@ -8316,6 +8408,8 @@ function StartAscensionLoop()
      mn_label = mn.." [Match]"
     elseif _pm_now == "manual" and ASC.manualMatchMode == "fallback" then
      mn_label = mn.." [Fallback]"
+    elseif _pm_now == "manual" and ASC.manualMatchMode == "fallback_easy" then
+     mn_label = mn.." [Fallback Easy]"
     elseif _pm_now == "bymap" then
      mn_label = mn.." [ByMap]"
     elseif _pm_now == "byrank" then
@@ -8354,12 +8448,26 @@ function StartAscensionLoop()
      [26]=10374, -- Goku Super 4+1
     }
 
-    -- [v64] LOGIKA KEPUTUSAN (disesuaikan untuk Tower 1-26)
-    -- Identik AUTO RAID: rune aktif di semua mode selama runeEnabled=true dan runeMapTarget valid
-    -- APM_UNLOCK hanya mengunci UI field (tidak bisa set baru), bukan memblokir eksekusi rune
+    -- [FIX] LOGIKA KEPUTUSAN (disesuaikan untuk Tower 1-26)
+    -- [BUGFIX] Sebelumnya Rune Map dianggap "aktif di semua mode" tanpa syarat --
+    -- ini yang menyebabkan Rune Map override paksa masuk ke tower manapun
+    -- (rank apapun) begitu ASC.runeEnabled=true, TIDAK PEDULI apakah entry yang
+    -- dipilih itu benar2 lolos Preferred Rank atau cuma hasil fallback rank-bebas.
+    -- FIX: khusus Pick Mode MANUAL, Rune Map HANYA boleh dieksekusi kalau
+    -- ASC.manualMatchMode == "primary" -- yaitu Preferred Rank user BENAR2 match
+    -- di entry ini. Kalau entry ini hasil fallback ("fallback" / "fallback_easy" /
+    -- "none"), Rune TIDAK BOLEH override -- script masuk apa adanya tanpa rune.
+    -- Mode lain (default/byrank/bymap/hard/easy) tidak diubah -- di luar laporan bug.
     local useRune = false
 
-    if ASC.runeEnabled and ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 then
+    local _runeAllowedByMode
+    if _pm_now == "manual" then
+     _runeAllowedByMode = (ASC.manualMatchMode == "primary")
+    else
+     _runeAllowedByMode = true -- perilaku lama dipertahankan untuk mode selain manual
+    end
+
+    if _runeAllowedByMode and ASC.runeEnabled and ASC.runeMapTarget >= 1 and ASC.runeMapTarget <= 26 then
      -- Anti-mubazir: kalau tower yang akan dimasuki sudah sama dengan target, simpan rune
      if mn == ASC.runeMapTarget then
       useRune = false
@@ -12884,6 +12992,7 @@ do
                 if not _HR_RPT.x100 then return end
                 task.wait(1.5)
             end
+            ResolveRE("AutoHeroQuirk", "AutoRandomHeroQuirk", 10)
             if not RE.AutoHeroQuirk then
                 for i=1,3 do _HR_RPT.SetSlot(i,"[!] Remote AutoRandomHeroQuirk nil") end
                 StopX100()
@@ -13006,6 +13115,7 @@ do
                             _HR_RPT.SetSlot(si,"[!] SELECT TARGET!")
                             task.wait(1); break
                         end
+                        ResolveRE("RandomHeroQuirk", "RandomHeroQuirk", 10)
                         if not RE.RandomHeroQuirk then
                             _HR_RPT.SetSlot(si,"[!] Remote RandomHeroQuirk nil")
                             task.wait(2); break
@@ -13015,6 +13125,7 @@ do
 
                         -- x100 path
                         if _HR_RPT.x100 then
+                            ResolveRE("AutoHeroQuirk", "AutoRandomHeroQuirk", 10)
                             if not RE.AutoHeroQuirk then
                                 _HR_RPT.SetSlot(si,"[!] AutoHeroQuirk nil"); task.wait(2); break
                             end
@@ -13351,6 +13462,11 @@ do
                     local tStr = table.concat(names, " / ")
                     _WR_RPT.SetSlot(si, "Rolling #"..attempt..(tStr~="" and " | "..tStr or ""))
 
+                    ResolveRE("RandomWeaponQuirk", "RandomWeaponQuirk", 10)
+                    if not RE.RandomWeaponQuirk then
+                        _WR_RPT.SetSlot(si, "[!] Remote RandomWeaponQuirk nil")
+                        task.wait(2); break
+                    end
                     _ourCall = true
                     local ok, res = pcall(function()
                         return RE.RandomWeaponQuirk:InvokeServer({
@@ -13506,6 +13622,7 @@ do
                 if not _WR_RPT.x100 then return end
                 task.wait(1.5)
             end
+            ResolveRE("AutoWeaponQuirk", "AutoRandomWeaponQuirk", 15)
             if not RE.AutoWeaponQuirk then
                 for i=1,3 do _WR_RPT.SetSlot(i, "[!] Remote AutoRandomWeaponQuirk nil") end
                 StopWRX100(); return
@@ -13663,6 +13780,11 @@ function _PG_StartSlot(si)
                 end
                 attempt = attempt + 1
                 _PGR_RPT.SetRoll(si, "[~] Roll #" .. attempt)
+                ResolveRE("RandomPetGearGrade", "RandomHeroEquipGrade", 10)
+                if not RE.RandomPetGearGrade then
+                    _PGR_RPT.SetRoll(si, "[!] Remote RandomHeroEquipGrade nil")
+                    task.wait(2); break
+                end
                 _ourCall = true
                 local ok, res = pcall(function()
                     return RE.RandomPetGearGrade:InvokeServer({
@@ -13779,6 +13901,7 @@ function StartPG100Loop(si)
                 end
                 attempt = attempt + 1
                 _PGR_RPT.SetRoll(si, "[~] 100x Roll #"..attempt.."...")
+                ResolveRE("AutoPetGearGrade", "AutoRandomHeroEquipGrade", 15)
                 if not RE.AutoPetGearGrade then
                     _PGR_RPT.SetRoll(si, "[!] Remote Auto100x tidak ditemukan!")
                     task.wait(2); break
@@ -14043,7 +14166,13 @@ do
         if _layer0Active then return end
         _layer0Active = true
 
-        -- Cache remote objects saat setup
+        -- Cache remote objects saat setup (resolve dulu kalau belum pernah
+        -- dipanggil dari titik reroll manapun -- SetupUniversalSpy bisa
+        -- terpanggil independen dari urutan reroll di atas)
+        ResolveRE("RandomHeroQuirk",   "RandomHeroQuirk", 10)
+        ResolveRE("AutoHeroQuirk",     "AutoRandomHeroQuirk", 10)
+        ResolveRE("RandomWeaponQuirk", "RandomWeaponQuirk", 10)
+        ResolveRE("RandomPetGearGrade","RandomHeroEquipGrade", 10)
         local _rHero      = RE.RandomHeroQuirk
         local _rAuto      = RE.AutoHeroQuirk
         local _rWeapon    = RE.RandomWeaponQuirk
@@ -14291,6 +14420,9 @@ do
 
                 local ok = pcall(function()
                     -- RE.RerollHalo adalah RemoteFunction → InvokeServer(drawId)
+                    if not RE.RerollHalo then
+                        RE.RerollHalo = Remotes:FindFirstChild("RerollHalo")
+                    end
                     if RE.RerollHalo then
                         RE.RerollHalo:InvokeServer(drawId)
                     end
