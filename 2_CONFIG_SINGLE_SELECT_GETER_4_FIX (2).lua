@@ -205,14 +205,41 @@ end)
 -- ============================================================
 -- FORMAT angka besar -> scientific (mirip game: 1.89E+26)
 -- ============================================================
+-- Suffix standar game (sama persis dengan sistem game)
+local _SUFFIXES = {
+    {1e0,  ""},    {1e3,  "K"},   {1e6,  "M"},   {1e9,  "B"},
+    {1e12, "T"},   {1e15, "Qa"},  {1e18, "Qi"},  {1e21, "Sx"},
+    {1e24, "Sp"},  {1e27, "Oc"},  {1e30, "No"},  {1e33, "Dc"},
+    {1e36, "Ud"},  {1e39, "Dd"},  {1e42, "Td"},  {1e45, "Qad"},
+    {1e48, "Qid"}, {1e51, "Sxd"}, {1e54, "Spd"}, {1e57, "Ocd"},
+    {1e60, "Nod"}, {1e63, "Vg"},  {1e66, "Uvg"},
+}
+local _SUFFIX_MAX = 1e69  -- di atas Uvg -> beralih ke format E
+
 local function fmtDps(n)
     if not n or n <= 0 then return "0" end
-    if n < 1 then return string.format("%.1f", n) end
-    -- Format game asli: eksponen selalu kelipatan 3 (SI style: E78, E81, E84...)
-    -- Mantissa menyesuaikan: bisa 1.X, 12.X, atau 123.X
-    -- Contoh: 6.03e79 -> 60.3E78 | 1.26e83 -> 126.5E81 | 1.1e81 -> 1.1E81
+    if n < 1 then return string.format("%.2f", n) end
+
+    -- Angka kecil-menengah: pakai suffix (K, M, B ... Uvg)
+    if n < _SUFFIX_MAX then
+        for i = #_SUFFIXES, 1, -1 do
+            local val, suf = _SUFFIXES[i][1], _SUFFIXES[i][2]
+            if n >= val then
+                if suf == "" then return tostring(math.floor(n + 0.5)) end
+                local mant = n / val
+                -- Hilangkan .0 jika tidak perlu (873.0Sp -> 873Sp)
+                if math.floor(mant * 10 + 0.5) % 10 == 0 then
+                    return string.format("%d%s", math.floor(mant + 0.5), suf)
+                end
+                return string.format("%.1f%s", mant, suf)
+            end
+        end
+    end
+
+    -- Angka sangat besar (>= 1e69): pakai format E kelipatan 3
+    -- Contoh: 6.03e79 -> 60.3E78 | 1.26e83 -> 126.5E81
     local exp  = math.floor(math.log10(n))
-    local exp3 = math.floor(exp / 3) * 3   -- bulatkan ke bawah ke kelipatan 3
+    local exp3 = math.floor(exp / 3) * 3
     local mant = n / (10 ^ exp3)
     return string.format("%.1fE%d", mant, exp3)
 end
