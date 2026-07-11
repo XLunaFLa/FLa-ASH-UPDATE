@@ -2804,7 +2804,7 @@ do
                     end
                     EnsureHeroAtkThreadFor(g)
                 end
-                task.wait(0.002)
+                task.wait(0.001)
             end
         end)
     end
@@ -3275,7 +3275,7 @@ do
                     end
                     EnsureHeroAtkThreadFor(g)
                 end
-                task.wait(0.002)
+                task.wait(0.001)
             end
         end)
 
@@ -17672,5 +17672,3 @@ do
         InitAllCaptureLayers()
     end
 end
-
-print("[ FLa ASH ] 5.lua v2 LOADED - Executor API: setthreadidentity, base64, appendfile+log, WebSocket, firetouchinterest, fireclickdetector, fireproximityprompt, firesignal, replicatesignal, getconnections, lz4, getgc/filtergc, getinstances, getnilinstances, cache.*, getrenv, getsenv, isscriptable, setscriptable, sethiddenproperty, gethiddenproperty, setrawmetatable, isreadonly, clonefunction, hookfunction, restorefunction, checkcaller, compareinstances, iscclosure, islclosure, isexecutorclosure, getfunctionhash, getscripthash, getcallbackvalue, getrunningscripts, getscripts, delfolder, debug.*, Drawing.*, getscriptbytecode, getscriptclosure, decompile, getloadedmodules, FLa_SafeRequire")
