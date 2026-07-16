@@ -2751,13 +2751,10 @@ do
                         if (tick() - last) >= 0.001 then
                             _lastFire[hGuid] = tick()
                             if RE.HeroUseSkill then
-                                -- [EDIT] RA & TA: attackType 3 ONLY, di-duplikat 5x per fire cycle
-                                -- (attackType 1 & 2 dinonaktifkan sepenuhnya)
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end) -- fire 1
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end) -- fire 2
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end) -- fire 3
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end) -- fire 4
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end) -- fire 5
+                                -- [EDIT] RA & TA: pakai attackType 1 dan 3 saja (attackType 2 dinonaktifkan)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
+                                task.wait(0.001)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end)
                             end
                         end
                         task.wait(0.001)
