@@ -2731,6 +2731,14 @@ do
     -- Source asli baris 2217-2260
     local _heroAtkThreads = {}
 
+    -- [FIX] RA+TA Fire Pulse Gate  saat RA & TA jalan bersamaan, gate ini
+    -- dipakai buat "matiin" sementara firing TA (RE.Atk/RE.Click/HeroUseSkill)
+    -- tiap 0.1 detik gantian, biar RA gak rebutan slot serang hero yang sama
+    -- ke 2 enemyGuid berbeda dalam waktu yang sama (penyebab damage server
+    -- gak stabil). RA TIDAK pernah digate -- selalu fire normal. Lihat
+    -- pulse controller di bawah FCharF. Default true = TA fire normal
+    -- (kondisi RA OFF atau TA OFF sendirian, behavior sama persis spt semula).
+    local _taFireGate = true
 
     local function EnsureHeroAtkThreadFor(g)
         if not g then return end
@@ -2740,7 +2748,12 @@ do
         task.spawn(function()
             local _lastFire = {}
             while handle.running do
-                if #HERO_GUIDS > 0 and (tick() - handle.tick) >= 0.001 and IsEnemyGuidValid(g) then
+                -- [FIX] Gate khusus kalau guid ini adalah target TA saat ini
+                -- DAN RA lagi jalan bareng -- selama fase OFF pulse, skip fire
+                -- cycle ini (RA dapat window eksklusif). Guid milik RA sendiri
+                -- TIDAK PERNAH kena gate ini (cek TA.cur.guid == g).
+                local _gateOK = not (RA.running and TA.running and TA.cur and TA.cur.guid == g and not _taFireGate)
+                if _gateOK and #HERO_GUIDS > 0 and (tick() - handle.tick) >= 0.001 and IsEnemyGuidValid(g) then
                     handle.tick = tick()
                     -- Ambil posisi player sekarang untuk dipasang ke semua hero
                     local _char = LP and LP.Character
@@ -2792,7 +2805,10 @@ do
         _taSpamThreads[g] = handle
         task.spawn(function()
             while handle.running do
-                if IsEnemyGuidValid(g) then
+                -- [FIX] Skip fire cycle ini kalau lagi fase OFF pulse (RA+TA
+                -- jalan bareng). Posisi/freeze/target-lock TA di luar fungsi
+                -- ini TIDAK kepengaruh, cuma bagian nembak remote yang skip.
+                if _taFireGate and IsEnemyGuidValid(g) then
                     if RE.Atk then
                         pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 1
                         pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 2
@@ -2834,6 +2850,35 @@ do
         if not g then return end
         TaSpamF(g, enemyHRP)
     end
+
+    --  RA+TA Concurrent Fire Pulse Controller 
+    -- [FIX] Root cause damage gak stabil saat RA+TA jalan bareng: RA (tAtk
+    -- thread) dan TA (TaSpamF/EnsureHeroAtkThreadFor) sama-sama spam
+    -- RE.Atk/RE.Click/RE.HeroUseSkill hampir tiap frame, TAPI target beda
+    -- (RA.cur.guid vs TA.cur.guid). Hero yang sama jadi ke-kirim FireServer
+    -- buat 2 enemyGuid berbeda nyaris bersamaan -- server jadi salah proses
+    -- hit / damage drop.
+    -- User sudah buktikan manual: toggle switch TA OFF/ON cepat bikin damage
+    -- stabil lagi (krn cuma 1 sisi yang fire tiap saat). Loop ini otomatisasi
+    -- pola itu TANPA menyentuh TA.running / switch visual TA sama sekali --
+    -- cuma _taFireGate yang dipakai internal (lihat EnsureHeroAtkThreadFor &
+    -- TaSpamF di atas) buat skip firing TA selama fase OFF.
+    -- Posisi/freeze/target-lock/Died-listener TA tetap jalan normal terus
+    -- tanpa gangguan, yang di-pause gantian cuma bagian nembak remote-nya.
+    -- RA TIDAK PERNAH digate -- selalu fire penuh seperti biasa.
+    task.spawn(function()
+        while true do
+            if RA.running and TA.running then
+                _taFireGate = false
+                task.wait(0.1)
+                _taFireGate = true
+                task.wait(0.1)
+            else
+                _taFireGate = true
+                task.wait(0.15)
+            end
+        end
+    end)
 
     --  Skill Effect Blocker 
     -- Source asli baris 5806-5907
