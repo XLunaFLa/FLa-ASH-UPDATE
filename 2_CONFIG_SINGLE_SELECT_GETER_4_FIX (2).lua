@@ -2751,11 +2751,12 @@ do
                         if (tick() - last) >= 0.001 then
                             _lastFire[hGuid] = tick()
                             if RE.HeroUseSkill then
+                                -- [EDIT] RA & TA: cuma attackType=1 yang dipakai, tapi di-fire 3x (duplikat)
                                 pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=2,userId=MY_USER_ID,enemyGuid=g}) end)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                             end
                         end
                         task.wait(0.001)
