@@ -3273,17 +3273,25 @@ do
             end
         end)
 
-        -- [v27] Attack thread RA: GASS terus, selalu serang guid musuh RA sendiri
+        -- [v28] Attack thread RA: disamakan dengan TA (TaSpamF) - triple-fire per iterasi
         local tAtk = task.spawn(function()
             while RA.running do
                 if RA.cur and IsTargetAliveRA(RA.cur) then
-                    local g   = RA.cur.guid
+                    local g = RA.cur.guid
                     if RE and RE.Atk then
-                        pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end)
+                        pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 1
+                        pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 2
+                        pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 3
                     end
                     if RE and RE.Click then
                         task.spawn(function()
-                            pcall(function() RE.Click:InvokeServer({enemyGuid=g}) end)
+                            pcall(function() RE.Click:InvokeServer({enemyGuid=g}) end) -- invoke 1
+                        end)
+                        task.spawn(function()
+                            pcall(function() RE.Click:InvokeServer({enemyGuid=g}) end) -- invoke 2
+                        end)
+                        task.spawn(function()
+                            pcall(function() RE.Click:InvokeServer({enemyGuid=g}) end) -- invoke 3
                         end)
                     end
                     EnsureHeroAtkThreadFor(g)
