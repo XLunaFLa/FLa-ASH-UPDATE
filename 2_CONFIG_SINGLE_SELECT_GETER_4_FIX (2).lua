@@ -2553,6 +2553,12 @@ do
     _visRandomAtk   = nil
 
     --  State RA & TA 
+    -- [v29] Shared stagger counter: bikin RA & TA gantian nembak per-Heartbeat frame,
+    -- supaya tidak rebutan/tabrakan saat RA & TA aktif bersamaan (balance fire).
+    local _atkStaggerFrame = 0
+    local _atkStaggerConn = RunService.Heartbeat:Connect(function()
+        _atkStaggerFrame = _atkStaggerFrame + 1
+    end)
     local RA = { running=false, threads={}, killed=0, cur=nil, next=nil, _lockConn=nil }
     local TA = { running=false, threads={}, killed=0, cur=nil, targetName=nil }
 
@@ -2793,7 +2799,7 @@ do
         _taSpamThreads[g] = handle
         task.spawn(function()
             while handle.running do
-                if IsEnemyGuidValid(g) then
+                if IsEnemyGuidValid(g) and (_atkStaggerFrame % 2 ~= 0) then
                     if RE.Atk then
                         pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 1
                         pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 2
@@ -3273,17 +3279,26 @@ do
             end
         end)
 
-        -- [v27] Attack thread RA: GASS terus, selalu serang guid musuh RA sendiri
+        -- [v29] Attack thread RA: disamakan dengan TA (TaSpamF) - triple-fire per iterasi
+        -- + stagger frame genap supaya gantian sama TA saat aktif bersamaan (balance fire)
         local tAtk = task.spawn(function()
             while RA.running do
-                if RA.cur and IsTargetAliveRA(RA.cur) then
-                    local g   = RA.cur.guid
+                if RA.cur and IsTargetAliveRA(RA.cur) and (_atkStaggerFrame % 2 == 0) then
+                    local g = RA.cur.guid
                     if RE and RE.Atk then
-                        pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end)
+                        pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 1
+                        pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 2
+                        pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 3
                     end
                     if RE and RE.Click then
                         task.spawn(function()
-                            pcall(function() RE.Click:InvokeServer({enemyGuid=g}) end)
+                            pcall(function() RE.Click:InvokeServer({enemyGuid=g}) end) -- invoke 1
+                        end)
+                        task.spawn(function()
+                            pcall(function() RE.Click:InvokeServer({enemyGuid=g}) end) -- invoke 2
+                        end)
+                        task.spawn(function()
+                            pcall(function() RE.Click:InvokeServer({enemyGuid=g}) end) -- invoke 3
                         end)
                     end
                     EnsureHeroAtkThreadFor(g)
