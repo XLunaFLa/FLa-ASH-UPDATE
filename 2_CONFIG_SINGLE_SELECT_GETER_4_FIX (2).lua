@@ -2553,12 +2553,6 @@ do
     _visRandomAtk   = nil
 
     --  State RA & TA 
-    -- [v29] Shared stagger counter: bikin RA & TA gantian nembak per-Heartbeat frame,
-    -- supaya tidak rebutan/tabrakan saat RA & TA aktif bersamaan (balance fire).
-    local _atkStaggerFrame = 0
-    local _atkStaggerConn = RunService.Heartbeat:Connect(function()
-        _atkStaggerFrame = _atkStaggerFrame + 1
-    end)
     local RA = { running=false, threads={}, killed=0, cur=nil, next=nil, _lockConn=nil }
     local TA = { running=false, threads={}, killed=0, cur=nil, targetName=nil }
 
@@ -2799,7 +2793,7 @@ do
         _taSpamThreads[g] = handle
         task.spawn(function()
             while handle.running do
-                if IsEnemyGuidValid(g) and (_atkStaggerFrame % 2 ~= 0) then
+                if IsEnemyGuidValid(g) then
                     if RE.Atk then
                         pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 1
                         pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 2
@@ -3279,11 +3273,10 @@ do
             end
         end)
 
-        -- [v29] Attack thread RA: disamakan dengan TA (TaSpamF) - triple-fire per iterasi
-        -- + stagger frame genap supaya gantian sama TA saat aktif bersamaan (balance fire)
+        -- [v28] Attack thread RA: disamakan dengan TA (TaSpamF) - triple-fire per iterasi, full speed
         local tAtk = task.spawn(function()
             while RA.running do
-                if RA.cur and IsTargetAliveRA(RA.cur) and (_atkStaggerFrame % 2 == 0) then
+                if RA.cur and IsTargetAliveRA(RA.cur) then
                     local g = RA.cur.guid
                     if RE and RE.Atk then
                         pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 1
