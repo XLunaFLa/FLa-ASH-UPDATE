@@ -3291,20 +3291,20 @@ do
             while TA.running do
                 tgt = FindByGuidF(targetGuid)
                 if not tgt then
-                    StopClickSpamF(targetGuid)
-                    StopHeroAtkThreadFor(targetGuid)
-                    TA.cur = nil
+                    -- [FIX v18] Dulu cuma set TA.running=false manual tanpa panggil
+                    -- StopTA() -> UnfreezePlayer() TIDAK pernah kepanggil di jalur ini,
+                    -- akibatnya player tetap Anchored (tersangkut) walau toggle UI sudah OFF.
+                    -- Sekarang panggil StopTA() dulu (unfreeze + full cleanup), baru onStop()
+                    -- untuk sinkronisasi visual toggle UI.
                     if onStatus then onStatus(" ["..targetName.."] mati") end
-                    TA.running = false
+                    StopTA()
                     if onStop then onStop() end
                     break
                 end
                 if IsDeadF(tgt) then
-                    StopClickSpamF(targetGuid)
-                    StopHeroAtkThreadFor(targetGuid)
-                    TA.cur = nil
+                    -- [FIX v18] sama seperti di atas: StopTA() dulu supaya Anchored terlepas.
                     if onStatus then onStatus(" ["..targetName.."] mati") end
-                    TA.running = false
+                    StopTA()
                     if onStop then onStop() end
                     break
                 end
