@@ -56,6 +56,15 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService        = game:GetService("RunService")
 local LP                = Players.LocalPlayer
 
+-- [WELCOME] Notifikasi sederhana saat script mulai jalan
+pcall(function()
+    game:GetService("StarterGui"):SetCore("SendNotification", {
+        Title = "FLa",
+        Text = "Welcome back!",
+        Duration = 4,
+    })
+end)
+
 -- ============================================================================
 -- [PERF] FETCH WINDUI PARALEL (dimulai paling awal, sebelum WaitForChild
 -- remote di bawah). HttpGet jalan di thread terpisah lewat task.spawn,
@@ -312,8 +321,10 @@ local ANON_NAME_TEXT      = "Roblox"
 local function _getUserIconButton()
     local ok, result = pcall(function()
         local coreGui   = game:GetService("CoreGui")
-        local hidden    = coreGui:FindFirstChild("HiddenUI")
-        local windUIGui = hidden and hidden:FindFirstChild("WindUI")
+        -- Path asli terkonfirmasi via debug: CoreGui.RobloxGui.WindUI.Window.Frame.Main.TextButton.UserIcon
+        -- (bukan CoreGui.HiddenUI.WindUI... seperti dugaan awal)
+        local robloxGui = coreGui:FindFirstChild("RobloxGui")
+        local windUIGui = robloxGui and robloxGui:FindFirstChild("WindUI")
         local win       = windUIGui and windUIGui:FindFirstChild("Window")
         local p = win
         for _, childName in ipairs({"Frame", "Main", "TextButton", "UserIcon"}) do
@@ -340,8 +351,6 @@ local function _captureUserIdentityOriginal(btn)
     local dn    = frame and frame:FindFirstChild("DisplayName")
     local un    = frame and frame:FindFirstChild("UserName")
 
-    print("[FLa UserIdentity] capture: photo="..tostring(photo).." frame="..tostring(frame).." dn="..tostring(dn).." un="..tostring(un))
-
     -- pcall TERPISAH per elemen, supaya kegagalan 1 elemen tidak mengunci
     -- _uiIdentityCaptured=false untuk elemen lain yang sebenarnya valid.
     if photo then
@@ -354,19 +363,13 @@ local function _captureUserIdentityOriginal(btn)
         pcall(function() _uiIdentityOriginal.userName = un.Text end)
     end
 
-    print("[FLa UserIdentity] captured values: photoTransparency="..tostring(_uiIdentityOriginal.photoTransparency)
-        .." displayName="..tostring(_uiIdentityOriginal.displayName)
-        .." userName="..tostring(_uiIdentityOriginal.userName))
-
     _uiIdentityCaptured = true
 end
 
 local function ToggleUserIdentity()
     local btn = _getUserIconButton()
-    print("[FLa UserIdentity] ToggleUserIdentity dipanggil. btn="..tostring(btn).." captured="..tostring(_uiIdentityCaptured))
     if not btn or not _uiIdentityCaptured then return end -- belum sempat capture original, jangan toggle dulu
     _uiIdentityAnon = not _uiIdentityAnon
-    print("[FLa UserIdentity] _uiIdentityAnon sekarang ="..tostring(_uiIdentityAnon))
 
     local photo = btn:FindFirstChild("ImageLabel")
     local frame = btn:FindFirstChild("Frame")
@@ -376,10 +379,7 @@ local function ToggleUserIdentity()
     -- Sembunyikan foto (transparency=1) saat anonim, tampilkan lagi saat asli
     if photo and _uiIdentityOriginal.photoTransparency ~= nil then
         local newVal = _uiIdentityAnon and 1 or _uiIdentityOriginal.photoTransparency
-        local ok, err = pcall(function() photo.ImageTransparency = newVal end)
-        print("[FLa UserIdentity] set photo.ImageTransparency -> "..tostring(newVal).." | ok="..tostring(ok).." err="..tostring(err))
-    else
-        print("[FLa UserIdentity] SKIP foto -- photo="..tostring(photo).." photoTransparency captured="..tostring(_uiIdentityOriginal.photoTransparency))
+        pcall(function() photo.ImageTransparency = newVal end)
     end
     if dn and _uiIdentityOriginal.displayName then
         pcall(function() dn.Text = _uiIdentityAnon and ANON_NAME_TEXT or _uiIdentityOriginal.displayName end)
@@ -411,6 +411,8 @@ task.spawn(function()
                 end
             end)
         end)
+    else
+        print("[FLa UserIdentity] btn tidak ketemu setelah 4 detik -- path RobloxGui.WindUI.Window.Frame.Main.TextButton.UserIcon mungkin masih perlu penyesuaian")
     end
 end)
 
@@ -520,8 +522,6 @@ do
     --  SECTION: COUNTER AUTO SELL HERO EQUIP
     --  Source asli baris ~3931-3969
     -- 
-    MainTab:Section({ Title = "Counter Auto Sell Hero Equip", Icon = "bar-chart-2" })
-
     -- Paragraph yang menampilkan angka R/Y/B/Supreme (diupdate via RefreshCounters)
     _cntParagraph = MainTab:Paragraph({
         Title = "Sold Count",
@@ -788,8 +788,6 @@ do
         --  SECTION: AUTO COLLECT GOLD & ITEM (WindUI)
         --  Source asli baris ~5150-5163
         -- 
-        MainTab:Section({ Title = "Auto Collect Gold & Item", Icon = "coins" })
-
         local _collectToggleElement = MainTab:Toggle({
             Flag     = "mainCollect",
             Title    = "AUTO COLLECT GOLD & ITEM",
@@ -1740,16 +1738,7 @@ do
     -- WINDUI UI ELEMENTS
     -- ============================================================
 
-    HideTab:Section({ Title = "Hide Manager", Icon = "eye-off" })
-
-    HideTab:Paragraph({
-        Title = "Hide Manager",
-        Desc  = "Sembunyikan elemen game. Toggle OFF untuk restore penuh.",
-    })
-
     -- 1. HIDE REROLL CHAT
-    HideTab:Section({ Title = "Hide Reroll Chat", Icon = "message-square-off" })
-
     local _hrcrToggle = HideTab:Toggle({
         Flag     = "hideRerollChat",
         Title    = "HIDE REROLL CHAT",
@@ -1766,8 +1755,6 @@ do
     end
 
     -- 2. HIDE ALL UI
-    HideTab:Section({ Title = "Hide All UI", Icon = "layout-dashboard" })
-
     local _hauiToggle = HideTab:Toggle({
         Flag     = "hideAllUI",
         Title    = "HIDE ALL UI",
@@ -1784,8 +1771,6 @@ do
     end
 
     -- 3. HIDE ALL ANIMATION
-    HideTab:Section({ Title = "Hide All Animation", Icon = "zap-off" })
-
     local _hanimToggle = HideTab:Toggle({
         Flag     = "hideAllAnim",
         Title    = "HIDE ALL ANIMATION",
@@ -1802,8 +1787,6 @@ do
     end
 
     -- 4. AUTO HIDE REWARD
-    HideTab:Section({ Title = "Auto Hide Reward", Icon = "gift" })
-
     local _hrewToggle = HideTab:Toggle({
         Flag     = "hideReward",
         Title    = "AUTO HIDE REWARD",
@@ -2561,6 +2544,13 @@ do
     local _deadG_F         = {}
     local HERO_GUIDS_F     = HERO_GUIDS  -- alias ke global, bukan copy
 
+    -- [HP-BASED DEATH DETECT] Table HP terkini per-guid, diisi oleh listener
+    -- ShowEnemyTakeDamageInfo (dipasang di section ENEMY HP MONITOR di bawah).
+    -- Dipakai IsTargetAliveRA (RA) dan IsDeadF (TA) sebagai sinyal kematian
+    -- pengganti Humanoid.Died/Humanoid.Health. Musuh yang GUID-nya belum pernah
+    -- muncul di table ini (belum pernah kena damage sama sekali) dianggap HIDUP.
+    _enemyHpByGuid = _enemyHpByGuid or {}
+
     --  Death listener global 
     -- Source asli baris 5587-5597
     if RE and RE.Death then
@@ -2614,12 +2604,14 @@ do
         return list
     end
 
+    -- [HP-BASED DEATH DETECT] Cek mati pakai HP dari remote ShowEnemyTakeDamageInfo
+    -- (_enemyHpByGuid), bukan Humanoid.Health/_deadG_F lagi. Musuh yang guid-nya
+    -- belum pernah tercatat di _enemyHpByGuid (belum pernah kena damage) dianggap HIDUP.
     local function IsDeadF(e)
         if not e then return true end
-        if _deadG_F[e.guid] then return true end
         if not e.model or not e.model.Parent then return true end
-        local hum = e.model:FindFirstChildOfClass("Humanoid")
-        if not hum or hum.Health <= 0 then return true end
+        local hp = _enemyHpByGuid[e.guid]
+        if hp ~= nil and hp <= 0 then return true end
         return false
     end
 
@@ -2751,7 +2743,11 @@ do
                         if (tick() - last) >= 0.001 then
                             _lastFire[hGuid] = tick()
                             if RE.HeroUseSkill then
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
+                                task.wait(0.001)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=2,userId=MY_USER_ID,enemyGuid=g}) end)
+                                task.wait(0.001)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=2,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
                                 pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
@@ -2796,18 +2792,10 @@ do
                 if IsEnemyGuidValid(g) then
                     if RE.Atk then
                         pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 1
-                        pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 2
-                        pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 3
                     end
                     if RE.Click then
                         task.spawn(function()
                             pcall(function() RE.Click:InvokeServer({enemyGuid=g}) end) -- invoke 1
-                        end)
-                        task.spawn(function()
-                            pcall(function() RE.Click:InvokeServer({enemyGuid=g}) end) -- invoke 2
-                        end)
-                        task.spawn(function()
-                            pcall(function() RE.Click:InvokeServer({enemyGuid=g}) end) -- invoke 3
                         end)
                     end
                     EnsureHeroAtkThreadFor(g)
@@ -3144,10 +3132,14 @@ do
         BlockEnemyHitAnim(true)
         BlockAffectedTargetEffect(true, "RA")
 
+        -- [HP-BASED DEATH DETECT] Cek hidup/mati pakai HP dari remote
+        -- ShowEnemyTakeDamageInfo (_enemyHpByGuid), bukan Humanoid.Health lagi.
+        -- Musuh yang guid-nya belum pernah tercatat di _enemyHpByGuid (belum
+        -- pernah kena damage) dianggap HIDUP.
         local function IsTargetAliveRA(t)
             if not t or not t.model or not t.model.Parent then return false end
-            local hum = t.model:FindFirstChildOfClass("Humanoid")
-            if not hum or hum.Health <= 0 then return false end
+            local hp = _enemyHpByGuid[t.guid]
+            if hp ~= nil and hp <= 0 then return false end
             return true
         end
 
@@ -3194,17 +3186,13 @@ do
             RA.next = PickRandomEnemy(excludes)
         end
 
-        local _raDiedConnsLocal = {}
+        -- [HP-BASED DEATH DETECT] WatchEnemyRA dipertahankan sebagai no-op guard
+        -- (dipanggil dari beberapa tempat) tapi tidak lagi connect ke Humanoid.Died.
+        -- Deteksi kematian sekarang murni polling _enemyHpByGuid via IsTargetAliveRA
+        -- di loop utama tMain (task.wait(0.15)) supaya ganti target cepat & konsisten
+        -- dengan satu sumber sinyal (HP remote), bukan campur event+polling lagi.
         local function WatchEnemyRA(e)
-            if not e or not e.model then return end
-            local hum = e.model:FindFirstChildOfClass("Humanoid"); if not hum then return end
-            local conn; conn = hum.Died:Connect(function()
-                _deadG_F[e.guid] = true
-                if RA.running then RA.killed = RA.killed + 1 end
-                if RA.cur and RA.cur.guid == e.guid then RA.cur = nil end
-                pcall(function() conn:Disconnect() end)
-            end)
-            table.insert(_raDiedConnsLocal, conn)
+            -- sengaja kosong: tidak ada lagi listener Humanoid.Died
         end
 
         -- Combat Lock via Heartbeat
@@ -3235,14 +3223,9 @@ do
             if RA.cur then
                 TpToRA(RA.cur); FreezePlayer()
                 WatchEnemyRA(RA.cur)
-                local hum = RA.cur.model:FindFirstChildOfClass("Humanoid")
-                if hum then
-                    local capturedGuid = RA.cur.guid
-                    hum.Died:Connect(function()
-                        RA.killed = RA.killed + 1
-                        if RA.cur and RA.cur.guid == capturedGuid then RA.cur = nil end
-                    end)
-                end
+                -- [HP-BASED DEATH DETECT] Tidak lagi connect Humanoid.Died di sini.
+                -- Kematian target dideteksi via IsTargetAliveRA (_enemyHpByGuid)
+                -- di pengecekan while-loop di bawah.
                 LockNextTarget()
             end
             while RA.running do
@@ -3257,14 +3240,7 @@ do
                     if RA.cur then
                         if not TA.running then TpToRA(RA.cur); FreezePlayer() end  -- TA ON: jangan override posisi TA
                         WatchEnemyRA(RA.cur)
-                        local hum = RA.cur.model:FindFirstChildOfClass("Humanoid")
-                        if hum then
-                            local capturedGuid = RA.cur.guid
-                            hum.Died:Connect(function()
-                                RA.killed = RA.killed + 1
-                                if RA.cur and RA.cur.guid == capturedGuid then RA.cur = nil end
-                            end)
-                        end
+                        -- [HP-BASED DEATH DETECT] Tidak lagi connect Humanoid.Died.
                         LockNextTarget()
                     end
                 end
@@ -3273,17 +3249,17 @@ do
             end
         end)
 
-        -- [v27] Attack thread RA: GASS terus, selalu serang guid musuh RA sendiri
+        -- [v29] Attack thread RA: disamakan dengan TA (TaSpamF) - single-fire per iterasi
         local tAtk = task.spawn(function()
             while RA.running do
                 if RA.cur and IsTargetAliveRA(RA.cur) then
-                    local g   = RA.cur.guid
+                    local g = RA.cur.guid
                     if RE and RE.Atk then
-                        pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end)
+                        pcall(function() RE.Atk:FireServer({attackEnemyGUID=g}) end) -- fire 1
                     end
                     if RE and RE.Click then
                         task.spawn(function()
-                            pcall(function() RE.Click:InvokeServer({enemyGuid=g}) end)
+                            pcall(function() RE.Click:InvokeServer({enemyGuid=g}) end) -- invoke 1
                         end)
                     end
                     EnsureHeroAtkThreadFor(g)
@@ -3307,18 +3283,10 @@ do
             if tgt then
                 TpToF(tgt); FreezePlayer()
                 TA.cur = tgt
-                local hum = tgt.model and tgt.model:FindFirstChildOfClass("Humanoid")
-                if hum then
-                    hum.Died:Connect(function()
-                        _deadG_F[targetGuid] = true
-                        if TA.running then TA.killed = TA.killed + 1 end
-                        StopClickSpamF(targetGuid)
-                        StopHeroAtkThreadFor(targetGuid)
-                        TA.cur=nil; TA.running=false
-                        if onStatus then onStatus(" ["..targetName.."] mati") end
-                        if onStop   then task.defer(onStop) end
-                    end)
-                end
+                -- [HP-BASED DEATH DETECT] Tidak lagi connect Humanoid.Died di sini.
+                -- Kematian target dideteksi via IsDeadF (_enemyHpByGuid) di
+                -- pengecekan while-loop di bawah, supaya ganti target cepat &
+                -- konsisten dengan satu sumber sinyal (HP remote).
             end
             while TA.running do
                 tgt = FindByGuidF(targetGuid)
@@ -3331,7 +3299,16 @@ do
                     if onStop then onStop() end
                     break
                 end
-                if not IsDeadF(tgt) and tgt.model.Parent then
+                if IsDeadF(tgt) then
+                    StopClickSpamF(targetGuid)
+                    StopHeroAtkThreadFor(targetGuid)
+                    TA.cur = nil
+                    if onStatus then onStatus(" ["..targetName.."] mati") end
+                    TA.running = false
+                    if onStop then onStop() end
+                    break
+                end
+                if tgt.model.Parent then
                     TA.cur = tgt
                     -- [v27] GASS terus tanpa jeda
                     ReassertFreeze()
@@ -3358,17 +3335,12 @@ do
         local tChar = task.spawn(function()
             local rrIdx    = 1
             local _curDied = false
-            local _diedConn = nil
+            -- [HP-BASED DEATH DETECT] WatchTarget dipertahankan sebagai no-op guard
+            -- (dipanggil dari beberapa tempat) tapi tidak lagi connect ke Humanoid.Died.
+            -- Kematian target dideteksi via IsDeadF (_enemyHpByGuid) di kondisi
+            -- while-loop rotasi round-robin di bawah.
             local function WatchTarget(tgt)
-                if _diedConn then pcall(function() _diedConn:Disconnect() end); _diedConn=nil end
-                if not tgt or not tgt.model then return end
-                local hum = tgt.model:FindFirstChildOfClass("Humanoid"); if not hum then return end
-                _diedConn = hum.Died:Connect(function()
-                    _deadG_F[tgt.guid] = true
-                    if TA.running then TA.killed = TA.killed + 1 end
-                    _curDied = true
-                    if TA.cur and TA.cur.guid == tgt.guid then TA.cur = nil end
-                end)
+                -- sengaja kosong: tidak ada lagi listener Humanoid.Died
             end
             while TA.running do
                 local pool = FindAllByNameF(targetName)
@@ -3380,7 +3352,7 @@ do
                         if #pool > 0 then break end
                     end
                     if not TA.running then break end
-                    _deadG_F={}; rrIdx=1; _curDied=false
+                    rrIdx=1; _curDied=false
                 end
                 if rrIdx > #pool then rrIdx = 1 end
                 local tgt = pool[rrIdx]
@@ -3409,7 +3381,6 @@ do
                     end
                 end
             end
-            if _diedConn then pcall(function() _diedConn:Disconnect() end) end
         end)
         TA.threads = {tChar}
     end
@@ -3627,6 +3598,15 @@ do
                         local eid = tostring(data.enemyId or "")
                         local hp  = tonumber(data.hp)    or 0
                         local mhp = tonumber(data.maxHp) or 0
+
+                        -- [HP-BASED DEATH DETECT] Catat HP terkini per-guid ke table
+                        -- global, dipakai IsTargetAliveRA (RA) & IsDeadF (TA).
+                        -- Ditaruh di awal (sebelum guard curMaxHp<=0 di bawah) supaya
+                        -- hp=0 (musuh mati) tetap tercatat walau maxHp tidak diketahui.
+                        if eid ~= "" then
+                            _enemyHpByGuid[eid] = hp
+                        end
+
                         if eid ~= "" and eid ~= _ehpLastEnemyId then
                             _ehpLastEnemyId = eid
                             _ehpMaxHp       = mhp
@@ -3659,31 +3639,6 @@ do
     end -- end Enemy HP Monitor block
 
     -- =========================================================================
-    --  RANDOM ATTACK (RA) 
-    -- Source asli baris 6509-6517
-    -- =========================================================================
-    FarmTab:Section({ Title = " RANDOM ATTACK", Icon = "sword" })
-
-    local _raToggleElement = FarmTab:Toggle({
-        Flag     = "farmRA",
-        Title    = "RANDOM ATTACK",
-        Desc     = "Auto attack musuh random sampai mati, lalu ganti target",
-        Value    = false,
-        Callback = function(on)
-            _raRunningState = on
-            if on then StartRA() else StopRA() end
-        end,
-    })
-
-    _setRAToggle = function(v)
-        _raRunningState = v
-        if _raToggleElement then pcall(function() _raToggleElement:Set(v) end) end
-    end
-    _visRandomAtk = function(v)
-        if _raToggleElement then pcall(function() _raToggleElement:Set(v, false) end) end
-    end
-
-    -- =========================================================================
     --  SELECT ENEMY / TARGET ATTACK (TA) 
     -- Source asli baris 6519-6783
     --
@@ -3698,8 +3653,6 @@ do
     --
     -- Logika identik, hanya UI layer yang beda (row individual  dropdown pilih target)
     -- =========================================================================
-    FarmTab:Section({ Title = " TARGET ATTACK", Icon = "crosshair" })
-
     local _taStatusPara      = FarmTab:Paragraph({ Title = "Status TA", Desc = "Idle" })
 
     -- Mode dropdown: By ID / By Name
@@ -3834,9 +3787,42 @@ do
         end,
     })
 
+    -- =========================================================================
+    --  RANDOM ATTACK (RA) 
+    -- Source asli baris 6509-6517
+    -- =========================================================================
+    local _raToggleElement = FarmTab:Toggle({
+        Flag     = "farmRA",
+        Title    = "RANDOM ATTACK",
+        Desc     = "Auto attack musuh random sampai mati, lalu ganti target",
+        Value    = false,
+        Callback = function(on)
+            _raRunningState = on
+            if on then StartRA() else StopRA() end
+        end,
+    })
+
+    _setRAToggle = function(v)
+        _raRunningState = v
+        if _raToggleElement then pcall(function() _raToggleElement:Set(v) end) end
+    end
+    _visRandomAtk = function(v)
+        if _raToggleElement then pcall(function() _raToggleElement:Set(v, false) end) end
+    end
+
     -- TARGET ATTACK Toggle (ON = START, OFF = STOP)  soal 9
     local _taToggleElement = nil
     local function _taOnStop()
+        -- [SYNC RA+TA] Kalau target TA mati SAAT RA juga sedang aktif bersamaan,
+        -- DAN mode select-nya "By ID" (bukan "By Name") -> matikan RA juga secara
+        -- total (fungsi/logika + visual toggle), bukan cuma TA.
+        -- Tidak berlaku kalau RA sedang OFF, atau mode-nya "By Name".
+        if _listMode == "id" and RA.running then
+            StopRA()
+            _raRunningState = false
+            if _raToggleElement then pcall(function() _raToggleElement:Set(false, false) end) end
+        end
+
         if _taToggleElement then
             pcall(function() _taToggleElement:Set(false, false) end)
         end
@@ -5521,8 +5507,6 @@ do
     end
 
     --  MASS ATTACK master toggle (identik 1.lua baris ~7018) 
-    MassAttackTab:Section({ Title = "Control" })
-
     local maToggle = MassAttackTab:Toggle({
         Flag     = "maToggle",
         Title    = "Mass Attack",
@@ -12698,25 +12682,9 @@ if not FLa_PressKey then
 end
 
 do
-    -- ── Section: Speed Run ───────────────────────────────────────
-    local speedSection = PlayerTab:Section({
-        Title  = "Speed Run",
-        Icon   = "zap",
-        Opened = true,
-        Box    = true,
-    })
-
-    -- Preset buttons (0%, 100%, 300%, 500%, 1000%)
-    local presets = {
-        { label = "0%",    v = 0   },
-        { label = "100%",  v = 16  },
-        { label = "300%",  v = 48  },
-        { label = "500%",  v = 80  },
-        { label = "1000%", v = 160 },
-    }
-
+    -- ── Speed Run (langsung di luar, tanpa box slide-up/down) ──────
     -- Paragraph untuk menampilkan speed saat ini
-    local speedPara = speedSection:Paragraph({
+    local speedPara = PlayerTab:Paragraph({
         Title = "WalkSpeed",
         Desc  = "160 (1000%)",
     })
@@ -12733,16 +12701,18 @@ do
         end
     end
 
-    -- Tombol preset
-    for _, pr in ipairs(presets) do
-        speedSection:Button({
-            Title    = pr.label,
-            Desc     = "Set WalkSpeed ke " .. pr.v .. " (" .. pr.label .. ")",
-            Callback = function()
-                SetSpeedValue(pr.v)
-            end,
-        })
-    end
+    -- Slider 0% - 1000% (WalkSpeed 0-160), geser bebas menggantikan tombol preset
+    local speedSlider = PlayerTab:Slider({
+        Flag     = "playerSpeedPct",
+        Title    = "Speed (%)",
+        Desc     = "Geser untuk atur WalkSpeed (0% - 1000%)",
+        Value    = { Min = 0, Max = 1000, Default = 1000 },
+        Step     = 10,
+        Callback = function(pct)
+            local spd = pct / 100 * 16 -- 100% = WalkSpeed 16 (default Roblox)
+            SetSpeedValue(spd)
+        end,
+    })
 
     -- Terapkan default speed 1000% saat karakter ready
     task.spawn(function()
@@ -12756,15 +12726,8 @@ do
         if hum then hum.WalkSpeed = _walkSpeedState end
     end)
 
-    -- ── Section: No Clip ─────────────────────────────────────────
-    local noClipSection = PlayerTab:Section({
-        Title  = "No Clip",
-        Icon   = "ghost",
-        Opened = true,
-        Box    = true,
-    })
-
-    local _noClipToggleEl = noClipSection:Toggle({
+    -- ── No Clip (langsung di luar, tanpa box slide-up/down) ────────
+    local _noClipToggleEl = PlayerTab:Toggle({
         Flag     = "playerNoClip",
         Title    = "No Clip",
         Desc     = "Tembus tembok & objek apapun selama aktif",
@@ -12839,23 +12802,11 @@ do
     --      workspace.Physics / Humanoid:SetStateEnabled toggle (paksa engine
     --      kirim network update ke server — ini yang paling efektif mencegah
     --      server-side idle detection)
-    local antiIdleSection = PlayerTab:Section({
-        Title  = "Anti Idle",
-        Icon   = "activity",
-        Opened = true,
-        Box    = true,
-    })
+    -- ── Anti Idle (langsung di luar, tanpa box slide-up/down) ──────
+    -- Status paragraph dihapus agar hemat tempat -- cukup toggle saja.
+    local function AntiIdleStat(msg) end -- no-op (dipanggil di banyak tempat internal, dibiarkan aman)
 
-    local antiIdleStatusPara = antiIdleSection:Paragraph({
-        Title = "Status",
-        Desc  = "Idle - Enable untuk START",
-    })
-
-    local function AntiIdleStat(msg)
-        pcall(function() antiIdleStatusPara:SetDesc(msg) end)
-    end
-
-    local _antiIdleToggleEl = antiIdleSection:Toggle({
+    local _antiIdleToggleEl = PlayerTab:Toggle({
         Flag     = "playerAntiIdle",
         Title    = "Anti Idle",
         Desc     = "Simulasi aktivitas nyata agar server tidak deteksi player diam",
@@ -12996,6 +12947,242 @@ do
     -- Expose setter WalkSpeed ke global (dibaca Config panel saat restore)
     _setSpeedSlider = function(v)
         pcall(function() SetSpeedValue(v) end)
+        pcall(function() speedSlider:Set(math.floor(v / 16 * 100)) end)
+    end
+
+    -- ── Fly (langsung di luar, tanpa box slide-up/down) ────────────
+    local UserInputService = game:GetService("UserInputService")
+
+    local _flyState    = false
+    local _flySpeed    = 50          -- studs/detik, default
+    local _flyConn      = nil        -- RunService.RenderStepped connection
+    local _flyBV        = nil        -- BodyVelocity dipasang di HumanoidRootPart
+    local _flyGyro       = nil       -- BodyGyro biar orientasi ngikut kamera
+    local _flyKeys      = {W=false, A=false, S=false, D=false, Space=false, Shift=false}
+
+    local function _flyCleanup()
+        if _flyConn then _flyConn:Disconnect(); _flyConn = nil end
+        if _flyBV then _flyBV:Destroy(); _flyBV = nil end
+        if _flyGyro then _flyGyro:Destroy(); _flyGyro = nil end
+        local char = LP.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then hum.PlatformStand = false end
+        end
+    end
+
+    local function StartFly()
+        local char = LP.Character
+        if not char then return end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hrp or not hum then return end
+
+        _flyCleanup() -- pastikan bersih sebelum pasang ulang
+
+        hum.PlatformStand = true
+
+        _flyBV = Instance.new("BodyVelocity")
+        _flyBV.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+        _flyBV.Velocity = Vector3.new(0, 0, 0)
+        _flyBV.Parent = hrp
+
+        _flyGyro = Instance.new("BodyGyro")
+        _flyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+        _flyGyro.P = 3000
+        _flyGyro.CFrame = hrp.CFrame
+        _flyGyro.Parent = hrp
+
+        local camera = workspace.CurrentCamera
+
+        _flyConn = RunService.RenderStepped:Connect(function()
+            if not _flyState then return end
+            local c = LP.Character
+            local h = c and c:FindFirstChild("HumanoidRootPart")
+            if not h or not _flyBV then return end
+
+            local camCF = camera.CFrame
+            local moveDir = Vector3.new(0, 0, 0)
+
+            if _flyKeys.W then moveDir = moveDir + camCF.LookVector end
+            if _flyKeys.S then moveDir = moveDir - camCF.LookVector end
+            if _flyKeys.A then moveDir = moveDir - camCF.RightVector end
+            if _flyKeys.D then moveDir = moveDir + camCF.RightVector end
+            if _flyKeys.Space then moveDir = moveDir + Vector3.new(0, 1, 0) end
+            if _flyKeys.Shift then moveDir = moveDir - Vector3.new(0, 1, 0) end
+
+            if moveDir.Magnitude > 0 then
+                moveDir = moveDir.Unit
+            end
+
+            _flyBV.Velocity = moveDir * _flySpeed
+            _flyGyro.CFrame = camCF
+        end)
+    end
+
+    local function StopFly()
+        _flyCleanup()
+    end
+
+    local _flyKeyDownConn = UserInputService.InputBegan:Connect(function(input, gpe)
+        if gpe or not _flyState then return end
+        if input.KeyCode == Enum.KeyCode.W then _flyKeys.W = true
+        elseif input.KeyCode == Enum.KeyCode.A then _flyKeys.A = true
+        elseif input.KeyCode == Enum.KeyCode.S then _flyKeys.S = true
+        elseif input.KeyCode == Enum.KeyCode.D then _flyKeys.D = true
+        elseif input.KeyCode == Enum.KeyCode.Space then _flyKeys.Space = true
+        elseif input.KeyCode == Enum.KeyCode.LeftShift then _flyKeys.Shift = true
+        end
+    end)
+    local _flyKeyUpConn = UserInputService.InputEnded:Connect(function(input, gpe)
+        if input.KeyCode == Enum.KeyCode.W then _flyKeys.W = false
+        elseif input.KeyCode == Enum.KeyCode.A then _flyKeys.A = false
+        elseif input.KeyCode == Enum.KeyCode.S then _flyKeys.S = false
+        elseif input.KeyCode == Enum.KeyCode.D then _flyKeys.D = false
+        elseif input.KeyCode == Enum.KeyCode.Space then _flyKeys.Space = false
+        elseif input.KeyCode == Enum.KeyCode.LeftShift then _flyKeys.Shift = false
+        end
+    end)
+
+    local _flyToggleEl = PlayerTab:Toggle({
+        Flag     = "playerFly",
+        Title    = "Fly",
+        Desc     = "Terbang bebas -- gerak pakai W/A/S/D, naik Space, turun Shift",
+        Default  = false,
+        Callback = function(on)
+            _flyState = on
+            if on then
+                StartFly()
+            else
+                for k in pairs(_flyKeys) do _flyKeys[k] = false end
+                StopFly()
+            end
+        end,
+    })
+
+    -- Slider speed Fly (studs/detik), pola sama seperti Speed Run
+    local _flySpeedSlider = PlayerTab:Slider({
+        Flag     = "playerFlySpeed",
+        Title    = "Fly Speed",
+        Desc     = "Geser untuk atur kecepatan terbang (studs/detik)",
+        Value    = { Min = 10, Max = 300, Default = 50 },
+        Step     = 10,
+        Callback = function(val)
+            _flySpeed = math.clamp(math.floor(val), 10, 300)
+        end,
+    })
+
+    -- Pastikan Fly mati bersih & restart otomatis saat karakter respawn
+    LP.CharacterAdded:Connect(function()
+        _flyCleanup()
+        if _flyState then
+            task.wait(1) -- kasih waktu HumanoidRootPart siap
+            StartFly()
+        end
+    end)
+
+    -- Expose setter Fly ke global (dibaca Config panel saat restore)
+    _setFlyToggle = function(v)
+        _flyState = v
+        if _flyToggleEl then pcall(function() _flyToggleEl:Set(v) end) end
+    end
+    _visFly = function(v)
+        if _flyToggleEl then pcall(function() _flyToggleEl:Set(v, false) end) end
+    end
+    _setFlySpeedSlider = function(v)
+        _flySpeed = math.clamp(math.floor(v), 10, 300)
+        if _flySpeedSlider then pcall(function() _flySpeedSlider:Set(_flySpeed) end) end
+    end
+
+    -- ── ESP Player Name (langsung di luar, tanpa box slide-up/down) ─
+    local _espState    = false
+    local _espTags     = {} -- [Player] = BillboardGui
+    local ESP_COLOR    = Color3.fromRGB(255, 0, 0) -- merah
+
+    local function _espRemoveTag(plr)
+        local tag = _espTags[plr]
+        if tag then
+            pcall(function() tag:Destroy() end)
+            _espTags[plr] = nil
+        end
+    end
+
+    local function _espAddTag(plr)
+        if plr == LP then return end -- jangan tampilkan diri sendiri
+        if _espTags[plr] then return end
+
+        local function attach(char)
+            if not _espState then return end
+            local head = char:WaitForChild("Head", 5)
+            if not head then return end
+
+            local bill = Instance.new("BillboardGui")
+            bill.Name             = "FLa_ESP_NameTag"
+            bill.Adornee          = head
+            bill.Size             = UDim2.new(0, 160, 0, 30)
+            bill.StudsOffset      = Vector3.new(0, 2.2, 0)
+            bill.AlwaysOnTop      = true
+            bill.MaxDistance      = 1000
+
+            local label = Instance.new("TextLabel")
+            label.BackgroundTransparency = 1
+            label.Size          = UDim2.new(1, 0, 1, 0)
+            label.Font          = Enum.Font.GothamBold
+            label.Text           = plr.Name
+            label.TextColor3    = ESP_COLOR
+            label.TextStrokeTransparency = 0
+            label.TextStrokeColor3 = Color3.new(0, 0, 0)
+            label.TextScaled    = true
+            label.Parent          = bill
+
+            bill.Parent = head
+            _espTags[plr] = bill
+        end
+
+        if plr.Character then attach(plr.Character) end
+        plr.CharacterAdded:Connect(function(char)
+            _espRemoveTag(plr)
+            if _espState then attach(char) end
+        end)
+    end
+
+    local function EnableESP()
+        for _, plr in ipairs(Players:GetPlayers()) do
+            _espAddTag(plr)
+        end
+    end
+
+    local function DisableESP()
+        for plr, _ in pairs(_espTags) do
+            _espRemoveTag(plr)
+        end
+    end
+
+    Players.PlayerAdded:Connect(function(plr)
+        if _espState then _espAddTag(plr) end
+    end)
+    Players.PlayerRemoving:Connect(function(plr)
+        _espRemoveTag(plr)
+    end)
+
+    local _espToggleEl = PlayerTab:Toggle({
+        Flag     = "playerESP",
+        Title    = "ESP Player Name",
+        Desc     = "Tampilkan nama semua player (warna merah) tembus tembok",
+        Default  = false,
+        Callback = function(on)
+            _espState = on
+            if on then EnableESP() else DisableESP() end
+        end,
+    })
+
+    -- Expose setter ESP ke global (dibaca Config panel saat restore)
+    _setESPToggle = function(v)
+        _espState = v
+        if _espToggleEl then pcall(function() _espToggleEl:Set(v) end) end
+    end
+    _visESP = function(v)
+        if _espToggleEl then pcall(function() _espToggleEl:Set(v, false) end) end
     end
 
 end -- do Player Tab
