@@ -2166,6 +2166,329 @@ end -- end do PANEL: MAIN (Auto Decompose Gems)
 
 -- ============================================================================
 -- PANEL: MAIN (lanjutan)
+-- AUTO MERGE GEMS
+-- ----------------------------------------------------------------------------
+-- CATATAN PENTING (hasil investigasi langsung via debug print di game):
+--   Item gem di GemsPanel TIDAK PUNYA attribute itemId/Id apapun (semua
+--   attribute kosong). Satu-satunya identitas yang membedakan jenis+level
+--   gem secara pasti adalah IconImage.Image (asset id icon), yang terbukti
+--   UNIK per kombinasi (jenis, level) -- contoh: Sapphire Lv.25, Lv.27,
+--   Lv.28, Lv.30 semua py asset id icon yang berbeda-beda, begitu juga
+--   Ruby & Emerald. Level (NumText "Lv.X") sendiri terbaca normal & akurat.
+--
+--   Karena asset id ini adalah ID upload gambar Roblox (angka acak, tidak
+--   ada pola matematis thd jenis/level), TIDAK BISA ditebak/dihitung untuk
+--   kombinasi yang belum pernah discan. Maka pendekatan yang dipakai:
+--   kelompokkan gem berdasarkan IconImage sebagai "fingerprint" unik,
+--   tanpa perlu tahu namanya persis (Ruby/Emerald/Sapphire) -- yang
+--   penting gem dengan fingerprint sama dijamin jenis+level sama, aman
+--   untuk di-merge bersama. Ditampilkan sbg "Gem Group #N (LvX, count pcs)".
+--
+--   Level 30 = MAX (tidak bisa di-merge lagi menurut info user), maka
+--   grup dengan level 30 di-exclude otomatis dari dropdown pilihan.
+--
+-- Remote: GemMerge:InvokeServer({guids = {guid1, guid2, ...}})
+-- Global expose: _mergeGemRunningState, _setMergeGemToggle, _visMergeGem
+-- ============================================================================
+do
+    --  Global expose (dibaca Config panel saat save/load) 
+    _mergeGemRunningState = false
+    _setMergeGemToggle    = nil
+    _visMergeGem          = nil
+
+    local GEM_MERGE_MAX_LEVEL = 30  -- level ini & di atasnya di-exclude (MAX, gak bisa merge)
+
+    --  State internal
+    local _mgGroups        = {}    -- list {iconId=, level=, count=, label=}, hasil SCAN terakhir
+    local _mgSelectedIcon  = nil   -- iconId grup yang dipilih user
+    local _mgSelectedLevel = nil   -- level grup yang dipilih (utk display saja)
+    local _mgCount         = 1
+    local _mgRunning       = false
+    local _mgThread        = nil
+
+    local _mgStatusParagraph = nil
+    local function SetMergeGemStatus(msg)
+        if not _mgStatusParagraph then return end
+        pcall(function() _mgStatusParagraph:SetDesc(msg) end)
+    end
+
+    local function isGuidNameMG(name)
+        return #name == 36 and name:find("^%x+%-%x+%-%x+%-%x+%-%x+$") ~= nil
+    end
+
+    --  ScanGemsPanelRawMG: scan mentah semua item GemsPanel, balikin list
+    --  {guid=, iconId=, level=} tanpa filter apapun.
+    local function ScanGemsPanelRawMG()
+        local result = {}
+        pcall(function()
+            local pg = LP.PlayerGui
+            local gp = pg:FindFirstChild("GemsPanel")
+            if not gp then return end
+
+            local sf = nil
+            pcall(function()
+                sf = gp:FindFirstChild("Frame")
+                    :FindFirstChild("BgImage")
+                    :FindFirstChild("List")
+                    :FindFirstChild("ScrollingFrame")
+            end)
+            if not sf then
+                for _, obj in ipairs(gp:GetDescendants()) do
+                    if obj:IsA("ScrollingFrame") then sf = obj; break end
+                end
+            end
+            if not sf then return end
+
+            for _, child in ipairs(sf:GetChildren()) do
+                repeat
+                    local guidStr = child.Name
+                    if not isGuidNameMG(guidStr) then break end
+
+                    local iconId, levelTxt = nil, nil
+                    for _, d in ipairs(child:GetDescendants()) do
+                        if d.Name == "IconImage" and (d:IsA("ImageLabel") or d:IsA("ImageButton")) then
+                            iconId = d.Image
+                        end
+                        if d.Name == "NumText" and d:IsA("TextLabel") then
+                            levelTxt = d.Text
+                        end
+                    end
+                    if not iconId then break end
+
+                    local lv = nil
+                    if levelTxt then
+                        lv = tonumber(levelTxt:match("[Ll][Vv]%.?%s*(%d+)"))
+                    end
+                    if not lv then break end
+
+                    table.insert(result, {guid = guidStr, iconId = iconId, level = lv})
+                until true
+            end
+        end)
+        return result
+    end
+
+    --  ScanAndGroupMG: scan panel, kelompokkan by iconId, exclude level MAX,
+    --  simpan hasil ke _mgGroups (dgn label deskriptif utk dropdown).
+    local function ScanAndGroupMG()
+        local raw = ScanGemsPanelRawMG()
+        local groupsByIcon = {}   -- [iconId] = {iconId=, level=, count=}
+        local order = {}
+
+        for _, item in ipairs(raw) do
+            if item.level < GEM_MERGE_MAX_LEVEL then   -- exclude level MAX (gak bisa merge)
+                if not groupsByIcon[item.iconId] then
+                    groupsByIcon[item.iconId] = {iconId = item.iconId, level = item.level, count = 0}
+                    table.insert(order, item.iconId)
+                end
+                groupsByIcon[item.iconId].count = groupsByIcon[item.iconId].count + 1
+            end
+        end
+
+        -- Urutkan by level (kecil ke besar) biar dropdown rapi
+        table.sort(order, function(a, b)
+            return groupsByIcon[a].level < groupsByIcon[b].level
+        end)
+
+        _mgGroups = {}
+        for i, iconId in ipairs(order) do
+            local g = groupsByIcon[iconId]
+            -- Hanya grup dengan minimal 2 gem yang berguna utk merge
+            if g.count >= 2 then
+                table.insert(_mgGroups, {
+                    iconId = g.iconId,
+                    level  = g.level,
+                    count  = g.count,
+                    label  = "Lv." .. g.level .. "  (" .. g.count .. " pcs)",
+                })
+            end
+        end
+
+        return _mgGroups, #raw
+    end
+
+    --  GetGemGuidsByIconMG: ambil guid terkini utk satu iconId spesifik
+    --  (dipanggil ulang tiap iterasi merge, supaya selalu fresh/up-to-date)
+    local function GetGemGuidsByIconMG(iconId)
+        local result = {}
+        for _, item in ipairs(ScanGemsPanelRawMG()) do
+            if item.iconId == iconId then
+                table.insert(result, item.guid)
+            end
+        end
+        return result
+    end
+
+    local _mgToggleElement = nil
+    local function SetMergeGemPillOff()
+        _mgRunning             = false
+        _mergeGemRunningState  = false
+        if _mgToggleElement then
+            pcall(function() _mgToggleElement:Set(false, false) end)
+        end
+    end
+
+    -- 
+    --  SECTION: AUTO MERGE GEMS (WindUI)
+    -- 
+    MainTab:Section({ Title = "Auto Merge Gems", Icon = "gem" })
+
+    _mgStatusParagraph = MainTab:Paragraph({
+        Title = "Status",
+        Desc  = "Idle - Buka GemsPanel, tekan SCAN GEMS",
+    })
+
+    -- Dropdown GEM GROUP (di-populate lewat tombol SCAN GEMS)
+    local _mgGroupDropElement = nil
+    local _mgLabelToGroup     = {}   -- [label] = group table
+
+    local function RefreshGroupDropdownMG()
+        local groups, totalRaw = ScanAndGroupMG()
+        local values = {}
+        _mgLabelToGroup = {}
+
+        for _, g in ipairs(groups) do
+            table.insert(values, g.label)
+            _mgLabelToGroup[g.label] = g
+        end
+
+        if _mgGroupDropElement then
+            pcall(function() _mgGroupDropElement:Refresh(values, nil) end)
+            pcall(function() _mgGroupDropElement.Values = values end)
+        end
+        _mgSelectedIcon  = nil
+        _mgSelectedLevel = nil
+
+        if totalRaw == 0 then
+            SetMergeGemStatus("[!] OPEN GemsPanel dulu / tidak ada gem terbaca!")
+        elseif #values == 0 then
+            SetMergeGemStatus("[!] Tidak ada gem yg bisa di-merge (semua Lv" .. GEM_MERGE_MAX_LEVEL .. "/MAX atau cuma 1pcs)")
+        else
+            SetMergeGemStatus("SCAN OK: " .. #values .. " grup gem siap di-merge")
+        end
+    end
+
+    _mgGroupDropElement = MainTab:Dropdown({
+        Flag     = "mainMergeGemGroup",
+        Title    = "Gem Group",
+        Desc     = "Tekan SCAN GEMS dulu, lalu pilih grup (Lv sama = boleh merge)",
+        Values   = {},
+        Value    = nil,
+        Multi    = false,
+        Callback = function(val)
+            local label = type(val) == "string" and val or nil
+            local g = label and _mgLabelToGroup[label]
+            if g then
+                _mgSelectedIcon  = g.iconId
+                _mgSelectedLevel = g.level
+                SetMergeGemStatus("READY: " .. g.label)
+            else
+                _mgSelectedIcon  = nil
+                _mgSelectedLevel = nil
+            end
+        end,
+    })
+
+    -- Tombol SCAN GEMS: scan ulang panel & isi dropdown Gem Group.
+    -- Bisa ditekan berkali-kali (misal stelah inventory berubah).
+    MainTab:Button({
+        Title    = "SCAN GEMS",
+        Desc     = "Deteksi grup gem yang bisa di-merge (buka GemsPanel dulu)",
+        Callback = function()
+            RefreshGroupDropdownMG()
+        end,
+    })
+
+    -- Input COUNT 1-5
+    local _mgCountInput = MainTab:Input({
+        Flag        = "mainMergeGemCount",
+        Title       = "Count (1-5)",
+        Desc        = "Jumlah gem digabung per merge (1-5)",
+        Placeholder = "Contoh: 3",
+        Value       = "1",
+        Callback    = function(val)
+            local n = tonumber(val)
+            if n and n >= 1 and n <= 5 then
+                _mgCount = math.floor(n)
+            end
+        end,
+    })
+
+    -- Toggle ON/OFF
+    _mgToggleElement = MainTab:Toggle({
+        Flag     = "mainMergeGemToggle",
+        Title    = "AUTO MERGE GEMS",
+        Desc     = "ON = START merge gems (auto-stop jika gem habis)",
+        Value    = false,
+        Callback = function(on)
+            if on then
+                if not _mgSelectedIcon or not _mgSelectedLevel then
+                    SetMergeGemStatus("[!] SCAN GEMS & pilih Gem Group dulu!")
+                    task.defer(function()
+                        if _mgToggleElement then
+                            pcall(function() _mgToggleElement:Set(false, false) end)
+                        end
+                    end)
+                    return
+                end
+
+                _mgRunning            = true
+                _mergeGemRunningState = true
+                if _mgThread then pcall(function() task.cancel(_mgThread) end) end
+
+                _mgThread = task.spawn(function()
+                    local icon  = _mgSelectedIcon
+                    local level = _mgSelectedLevel
+                    while _mgRunning do
+                        local cnt   = _mgCount
+                        local guids = GetGemGuidsByIconMG(icon)
+
+                        if #guids < cnt then
+                            SetMergeGemStatus("[STOP] Lv" .. level .. " habis (sisa " .. #guids .. ")")
+                            break
+                        end
+
+                        local batch = {}
+                        for i = 1, cnt do table.insert(batch, guids[i]) end
+
+                        SetMergeGemStatus("[M] Merging Lv" .. level .. " x" .. cnt)
+                        pcall(function()
+                            local re = Remotes:FindFirstChild("GemMerge")
+                            if re then re:InvokeServer({guids = batch}) end
+                        end)
+                        SetMergeGemStatus("[OK] Merge DONE x" .. cnt)
+                        task.wait(0.5)
+                    end
+                    SetMergeGemPillOff()
+                end)
+            else
+                _mgRunning            = false
+                _mergeGemRunningState = false
+                if _mgThread then
+                    pcall(function() task.cancel(_mgThread) end)
+                    _mgThread = nil
+                end
+                SetMergeGemStatus("Idle - Buka GemsPanel, tekan SCAN GEMS")
+            end
+        end,
+    })
+
+    --  Expose ke global (dibaca Config panel saat restore)
+    _setMergeGemToggle = function(v)
+        if _mgToggleElement then
+            _mgToggleElement:Set(v)
+        end
+    end
+    _visMergeGem = function(v)
+        if _mgToggleElement then
+            _mgToggleElement:Set(v, false)
+        end
+    end
+
+end -- end do PANEL: MAIN (Auto Merge Gems)
+
+-- ============================================================================
+-- PANEL: MAIN (lanjutan)
 -- AUTO MERGE POTION
 -- Dipindah dari baris ~8627 source premium (v243)
 -- Ditulis ulang pakai WindUI native API
@@ -3607,17 +3930,6 @@ do
                             _enemyHpByGuid[eid] = hp
                         end
 
-                        -- [TA-ONLY FILTER] Tampilan HP Monitor (Paragraph HP/DPS/Rate)
-                        -- khusus untuk musuh yang sedang di-lock TARGET ATTACK.
-                        -- PENTING: field guid yang benar untuk dicocokkan dengan
-                        -- TA.cur.guid adalah data.enemyGuid (format GUID string),
-                        -- BUKAN data.enemyId (angka biasa, sudah dipakai di atas
-                        -- untuk _enemyHpByGuid dan tidak diubah supaya deteksi
-                        -- kematian RA/TA tidak rusak).
-                        local eguid = tostring(data.enemyGuid or "")
-                        if not TA.running or not TA.cur or not TA.cur.guid then return end
-                        if eguid == "" or eguid ~= tostring(TA.cur.guid) then return end
-
                         if eid ~= "" and eid ~= _ehpLastEnemyId then
                             _ehpLastEnemyId = eid
                             _ehpMaxHp       = mhp
@@ -3636,12 +3948,8 @@ do
                             end)
                         end
                     end)
-                    -- DPS capture: hanya damage dari player kita sendiri, DAN hanya
-                    -- terhadap musuh yang sedang di-lock TARGET ATTACK (match via enemyGuid).
+                    -- DPS capture: hanya damage dari player kita sendiri
                     pcall(function()
-                        if not TA.running or not TA.cur or not TA.cur.guid then return end
-                        local eguid = tostring(data.enemyGuid or "")
-                        if eguid == "" or eguid ~= tostring(TA.cur.guid) then return end
                         local uid = tostring(data.attackUserId or "")
                         if uid ~= MY_USER_ID then return end
                         local dmg = tonumber(data.attack) or tonumber(data.realityHarm) or 0
