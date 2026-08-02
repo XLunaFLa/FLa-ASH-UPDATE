@@ -96,50 +96,137 @@ if not Remotes then
 end
 
 
---  BLOCK HERO HIT-ANIM (GLOBAL, independen RA/TA) 
--- Menstop AnimationTrack yang menumpuk di Animator milik Hero (workspace.Heros)
--- akibat spam attack (RA/TA) supaya tidak kena limit 64 track/Animator.
--- HANYA menstop AnimationTrack -- tidak menyentuh remote/fire attack logic,
--- jadi TIDAK mengganggu fungsi serang RA/TA. Aktif dari awal script jalan,
--- tidak bergantung pada state RA.running / TA.running manapun.
-local _heroAnimConns = {}
-local function _blockHeroTrack(animator)
+--  BLOCK ANIMATION TOTAL (GLOBAL, independen RA/TA) 
+-- Menstop + mencegah SEMUA AnimationTrack di 3 kategori:
+--   1. PLAYER   (LP.Character)
+--   2. HEROS    (workspace.Heros)
+--   3. ENEMIES  (semua folder musuh yang dipakai script ini: Bosses, Boss,
+--                RaidBoss, Enemys, Enemy, Enemies, RaidEnemys, Monsters,
+--                Monster, EnemyCityRaid, CityRaidEnemys)
+-- Menghapus warning "Failed to play animation: rbxassetid://..." dengan cara
+-- menstop track SEBELUM asset selesai/gagal di-load, dan terus-menerus
+-- menyapu Animator baru (hero/enemy baru spawn, player respawn).
+-- HANYA menstop/menghapus AnimationTrack -- tidak menyentuh remote/fire
+-- attack logic, jadi TIDAK mengganggu fungsi serang RA/TA/MA manapun.
+-- Aktif dari awal script jalan, tidak bergantung pada state RA/TA/MA.
+local _animBlockConns = {}
+
+local function _blockAnimTrack(animator)
+    if not animator or not animator:IsA("Animator") then return end
     pcall(function()
         for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
-            track:Stop(0)
+            pcall(function() track:Stop(0) end)
         end
     end)
-    table.insert(_heroAnimConns, animator.AnimationPlayed:Connect(function(track)
+    table.insert(_animBlockConns, animator.AnimationPlayed:Connect(function(track)
         pcall(function() track:Stop(0) end)
     end))
 end
 
-local function _hookHeroFolder()
-    local herosFolder = workspace:FindFirstChild("Heros")
-    if not herosFolder then return end
-
+local function _hookAnimatorsIn(root)
+    if not root then return end
     -- pasang di semua Animator yang sudah ada
-    for _, desc in ipairs(herosFolder:GetDescendants()) do
+    for _, desc in ipairs(root:GetDescendants()) do
         if desc:IsA("Animator") then
-            _blockHeroTrack(desc)
+            _blockAnimTrack(desc)
         end
     end
-
-    -- pasang di Animator baru (hero baru di-summon/respawn)
-    table.insert(_heroAnimConns, herosFolder.DescendantAdded:Connect(function(desc)
+    -- pasang di Animator baru (spawn/respawn baru)
+    table.insert(_animBlockConns, root.DescendantAdded:Connect(function(desc)
         if desc:IsA("Animator") then
-            _blockHeroTrack(desc)
+            _blockAnimTrack(desc)
         end
     end))
 end
 
-task.spawn(function()
-    -- tunggu folder Heros muncul kalau belum ada saat script pertama jalan
+local _ANIM_ENEMY_FOLDER_NAMES = {
+    "Bosses", "Boss", "RaidBoss", "Enemys", "Enemy", "Enemies",
+    "RaidEnemys", "Monsters", "Monster", "EnemyCityRaid", "CityRaidEnemys",
+}
+
+local function _hookEnemyAnimFolders()
+    for _, fname in ipairs(_ANIM_ENEMY_FOLDER_NAMES) do
+        local f = workspace:FindFirstChild(fname)
+        if f then
+            _hookAnimatorsIn(f)
+        end
+    end
+    -- pasang juga di workspace langsung, jaga-jaga folder musuh baru muncul
+    -- belakangan (folder itu sendiri belum ada saat script pertama jalan)
+    table.insert(_animBlockConns, workspace.ChildAdded:Connect(function(child)
+        for _, fname in ipairs(_ANIM_ENEMY_FOLDER_NAMES) do
+            if child.Name == fname then
+                _hookAnimatorsIn(child)
+                break
+            end
+        end
+    end))
+end
+
+local function _hookHeroAnimFolder()
     local herosFolder = workspace:FindFirstChild("Heros")
     if not herosFolder then
         herosFolder = workspace:WaitForChild("Heros", 30)
     end
-    pcall(_hookHeroFolder)
+    if herosFolder then
+        _hookAnimatorsIn(herosFolder)
+    end
+end
+
+local function _hookPlayerAnim()
+    local function hookChar(char)
+        if not char then return end
+        _hookAnimatorsIn(char)
+    end
+    hookChar(LP.Character)
+    table.insert(_animBlockConns, LP.CharacterAdded:Connect(function(char)
+        hookChar(char)
+    end))
+end
+
+task.spawn(function()
+    pcall(_hookHeroAnimFolder)
+end)
+task.spawn(function()
+    pcall(_hookEnemyAnimFolders)
+end)
+task.spawn(function()
+    pcall(_hookPlayerAnim)
+end)
+
+-- [FIX 64-TRACK LIMIT] Listener reaktif (AnimationPlayed) saja tidak cukup:
+-- attack loop RA/TA/Auto-Raid fire remote sampai tiap 0.001s, jadi banyak
+-- animasi bisa ke-play beruntun DALAM 1 FRAME YANG SAMA, sebelum listener
+-- sempat men-Stop() satu-per-satu -> track menumpuk lebih cepat dari proses
+-- stop-nya dan tetap kena limit keras 64/Animator ("AnimationTrack limit of
+-- 64 tracks exceeded"). Solusi: proactive polling loop yang jalan TERUS dari
+-- awal script (independen RA/TA/MA), menyapu SEMUA Animator yang sedang
+-- playing track di Player + Heros + semua folder Enemy setiap ~0.03 detik.
+local function _sweepAnimatorsIn(root)
+    if not root then return end
+    for _, desc in ipairs(root:GetDescendants()) do
+        if desc:IsA("Animator") then
+            local tracks = desc:GetPlayingAnimationTracks()
+            if #tracks > 0 then
+                for _, track in ipairs(tracks) do
+                    pcall(function() track:Stop(0) end)
+                end
+            end
+        end
+    end
+end
+
+task.spawn(function()
+    while true do
+        pcall(function()
+            _sweepAnimatorsIn(LP.Character)
+            _sweepAnimatorsIn(workspace:FindFirstChild("Heros"))
+            for _, fname in ipairs(_ANIM_ENEMY_FOLDER_NAMES) do
+                _sweepAnimatorsIn(workspace:FindFirstChild(fname))
+            end
+        end)
+        task.wait(0.03)
+    end
 end)
 
 --  GLOBALS FARM (dibutuhkan StartRA / TA) 
@@ -417,27 +504,12 @@ task.spawn(function()
 end)
 
 -- ============================================================================
--- 11 TAB SESUAI URUTAN TERBARU
+-- 4 TAB: FARM, AUTOMATION, PLAYER, CONFIG
 -- ============================================================================
-
-local MainTab = Window:Tab({
-    Title = "Main",
-    Icon  = "home",
-})
-
-local HideTab = Window:Tab({
-    Title = "Hide",
-    Icon  = "eye-off",
-})
 
 local FarmTab = Window:Tab({
     Title = "Farm",
     Icon  = "sword",
-})
-
-local MassAttackTab = Window:Tab({
-    Title = "Mass Attack",
-    Icon  = "swords",
 })
 
 local AutomationTab = Window:Tab({
@@ -445,34 +517,14 @@ local AutomationTab = Window:Tab({
     Icon  = "bot",
 })
 
-local RerollTab = Window:Tab({
-    Title = "Reroll",
-    Icon  = "dices",
-})
-
 local PlayerTab = Window:Tab({
     Title = "Player",
     Icon  = "user",
 })
 
-local SettingTab = Window:Tab({
-    Title = "Setting",
-    Icon  = "settings",
-})
-
-local WebhookTab = Window:Tab({
-    Title = "Webhook",
-    Icon  = "send",
-})
-
 local ConfigTab = Window:Tab({
     Title = "Config",
     Icon  = "save",
-})
-
-local ThemeTab = Window:Tab({
-    Title = "Theme",
-    Icon  = "palette",
 })
 
 -- ============================================================================
@@ -770,19 +822,21 @@ do
                             if RE.HeroUseSkill then
                                 pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=2,userId=MY_USER_ID,enemyGuid=g}) end)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=2,userId=MY_USER_ID,enemyGuid=g}) end)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
+                                task.wait(0.001)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                             end
                         end
                         task.wait(0.001)
                     end
                 end
-                task.wait(0.05)
+                task.wait(0.001)
                 if not IsEnemyGuidValid(g) then
                     handle.running = false
                 end
@@ -2463,7 +2517,6 @@ do
     })
 
 end -- end do PANEL: FARM
-end)
 
 
 -- ============================================================================
@@ -7695,9 +7748,9 @@ function EnsureSiegeHeroAtkThreadFor(g)
                         if RE.HeroUseSkill then
                             pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g,targetPos=_atkPos}) end)
                             PG_Wait(0.1)
-                            pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=2,userId=MY_USER_ID,enemyGuid=g,targetPos=_atkPos}) end)
+                            pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g,targetPos=_atkPos}) end)
                             PG_Wait(0.1)
-                            pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g,targetPos=_atkPos}) end)
+                            pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g,targetPos=_atkPos}) end)
                         end
                     end
                     PG_Wait(0.05)
