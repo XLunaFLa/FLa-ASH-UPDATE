@@ -95,6 +95,15 @@ if not Remotes then
     error("[FLa] Folder 'Remotes' tidak ketemu dalam 30 detik - coba tunggu lebih lama setelah masuk game sebelum execute.")
 end
 
+-- [INIT] EquipLoadoutSave -- dipanggil sekali di awal, begitu script pertama
+-- kali di-execute (sebelum fitur lain dibangun).
+pcall(function()
+    local args = {
+        1
+    }
+    Remotes:WaitForChild("EquipLoadoutSave"):InvokeServer(unpack(args))
+end)
+
 
 --  BLOCK ANIMATION TOTAL (GLOBAL, independen RA/TA) 
 -- Menstop + mencegah SEMUA AnimationTrack di 3 kategori:
@@ -3472,7 +3481,6 @@ do
         pcall(function()
             hrp.CFrame = destCF
         end)
-        TpHerosToPos(destCF)
         FreezePlayer()
     end
 
@@ -3537,15 +3545,15 @@ do
                             if RE.HeroUseSkill then
                                 pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
                                 pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
                                 pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end)
                             end
                         end
                         task.wait(0.001)
@@ -4168,7 +4176,6 @@ do
             pcall(function()
                 hrp.CFrame = destCF
             end)
-            TpHerosToPos(destCF)
         end
 
         local function PickRandomEnemy(excludeGuids)
