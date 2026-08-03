@@ -95,15 +95,6 @@ if not Remotes then
     error("[FLa] Folder 'Remotes' tidak ketemu dalam 30 detik - coba tunggu lebih lama setelah masuk game sebelum execute.")
 end
 
--- [INIT] EquipLoadoutSave -- dipanggil sekali di awal, begitu script pertama
--- kali di-execute (sebelum fitur lain dibangun).
-pcall(function()
-    local args = {
-        1
-    }
-    Remotes:WaitForChild("EquipLoadoutSave"):InvokeServer(unpack(args))
-end)
-
 
 --  BLOCK ANIMATION TOTAL (GLOBAL, independen RA/TA) 
 -- Menstop + mencegah SEMUA AnimationTrack di 3 kategori:
@@ -3288,6 +3279,16 @@ do
     local RA = { running=false, threads={}, killed=0, cur=nil, next=nil, _lockConn=nil }
     local TA = { running=false, threads={}, killed=0, cur=nil, targetName=nil }
 
+    -- [RA/TA RESERVATION] GUID musuh yang sedang dipilih di dropdown "Pilih Enemy"
+    -- (mode By ID) -- ini "jatah" TARGET ATTACK. RANDOM ATTACK wajib exclude GUID
+    -- ini dari pool kandidatnya, supaya RA tidak pernah menyerang musuh yang sudah
+    -- dipilih user untuk TA, baik TA itu sedang ON maupun masih OFF/belum ditekan.
+    -- Diisi dari callback dropdown & tombol REFRESH ENEMIES (lihat blok SELECT ENEMY).
+    local _taReservedGuid = nil
+    -- Mode By Name tidak punya 1 GUID tunggal (banyak instance nama sama), jadi
+    -- reservasinya berbasis NAMA -- semua musuh dengan nama ini di-exclude dari RA.
+    local _taReservedName = nil
+
     local _byNameLiveToken = nil
     local _raDiedConns     = {}
     local _deadG_F         = {}
@@ -3422,57 +3423,9 @@ do
         end
     end
 
-    --  TpHerosToPos  teleport semua hero (workspace.Heros) ke CFrame yang sama
-    -- dengan player, supaya hero ikut pindah tiap kali target RA/TA berganti.
-    -- Client-side only (set CFrame HumanoidRootPart tiap model hero), pola sama
-    -- persis dengan yang sudah dipakai di Auto Ascension (lihat _offsetFromBoss
-    -- TP hero baris ~10095-10106).
-    local function TpHerosToPos(cf)
-        if not cf then return end
-        pcall(function()
-            local herosFolder = workspace:FindFirstChild("Heros")
-            if not herosFolder then return end
-            -- [FIX] Struktur nyata: workspace.Heros.Hero_XXXXXXX.<NamaHero>.HumanoidRootPart
-            -- (ada 1 model wrapper "Hero_XXXXXXX" di antara folder Heros dan hero
-            -- aslinya). GetChildren() level pertama SAJA tidak cukup -- harus
-            -- scan tiap Humanoid di dalam wrapper itu (bukan GetDescendants penuh
-            -- workspace.Heros, supaya tidak ikut TP part lain yang kebetulan
-            -- bernama sama di masa depan).
-            --
-            -- [FIX OVERLAP] Hero TIDAK ditumpuk persis di titik yang sama (cf),
-            -- tapi disebar melingkar 2 stud dari titik itu -- pola sama seperti
-            -- _offsetFromBoss di Auto Ascension. Kalau semua hero + player numpuk
-            -- di 1 titik yang sama persis dengan musuh, efek server seperti
-            -- AffectedTargetEffect (yang keluar nempel di HumanoidRootPart
-            -- terdekat) jadi gampang salah nempel ke Hero alih-alih musuh,
-            -- menyebabkan warning "tried to set parent to NULL". Offset kecil
-            -- ini tidak mengubah efektivitas serangan (hero tetap dalam jarak
-            -- attack range), cuma menghindari tumpukan fisik persis di 1 titik.
-            local hrpList = {}
-            for _, wrapper in ipairs(herosFolder:GetChildren()) do
-                local directHrp = wrapper:FindFirstChild("HumanoidRootPart")
-                if directHrp then table.insert(hrpList, directHrp) end
-                for _, hModel in ipairs(wrapper:GetChildren()) do
-                    if hModel:IsA("Model") then
-                        local hHrp = hModel:FindFirstChild("HumanoidRootPart")
-                        if hHrp then table.insert(hrpList, hHrp) end
-                    end
-                end
-            end
-
-            local n = #hrpList
-            if n == 0 then return end
-            for i, hHrp in ipairs(hrpList) do
-                local angle  = (i - 1) * (2 * math.pi / math.max(n, 1))
-                local offset = Vector3.new(math.cos(angle) * 2, 0, math.sin(angle) * 2)
-                local destCF = cf * CFrame.new(offset)
-                pcall(function() hHrp.CFrame = destCF end)
-            end
-        end)
-    end
-
     --  TpToF  teleport 3 stud di depan musuh + FreezePlayer (anchor + velocity reset)
-    -- + ikut teleport semua Hero ke posisi yang sama dengan Player.
+    -- [REMOVED] Hero tidak lagi ikut teleport ke posisi player (TpHerosToPos
+    -- dihapus) -- hero dibiarkan di posisi mereka sendiri.
     local function TpToF(tgt)
         if not tgt or not tgt.hrp then return end
         local char = LP.Character; if not char then return end
@@ -3545,15 +3498,15 @@ do
                             if RE.HeroUseSkill then
                                 pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
                                 pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
                                 pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                                 task.wait(0.001)
-                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=3,userId=MY_USER_ID,enemyGuid=g}) end)
+                                pcall(function() RE.HeroUseSkill:FireServer({heroGuid=hGuid,attackType=1,userId=MY_USER_ID,enemyGuid=g}) end)
                             end
                         end
                         task.wait(0.001)
@@ -4181,10 +4134,18 @@ do
         local function PickRandomEnemy(excludeGuids)
             local pool = {}
             local taGuid = TA.running and TA.cur and TA.cur.guid
+            -- [RA/TA RESERVATION] Musuh yang dipilih di dropdown "Pilih Enemy" (jatah
+            -- TA) di-exclude juga dari pool RA, walau TA belum di-ON-kan sama sekali.
+            -- Mode By ID -> exclude by GUID tunggal. Mode By Name -> exclude SEMUA
+            -- musuh yang namanya cocok (bisa lebih dari satu instance di map).
+            local reservedGuid = _taReservedGuid
+            local reservedName = _taReservedName
             for _,e in ipairs(GetEnemiesF()) do
                 if IsTargetAliveRA(e) then
                     local skip = false
                     if taGuid and e.guid == taGuid then skip = true end
+                    if reservedGuid and e.guid == reservedGuid then skip = true end
+                    if reservedName and e.name == reservedName then skip = true end
                     if excludeGuids then
                         for _,ex in ipairs(excludeGuids) do
                             if e.guid == ex then skip = true; break end
@@ -4194,6 +4155,10 @@ do
                 end
             end
             if #pool == 0 then
+                -- Fallback: kalau exclude bikin pool kosong (mis. musuh yang hidup
+                -- tinggal 1 dan itu adalah jatah TA), RA tetap boleh pakai musuh itu
+                -- supaya RA tidak macet idle total. Reservasi TA tetap prioritas
+                -- utama selama masih ada musuh lain yang hidup.
                 for _,e in ipairs(GetEnemiesF()) do
                     if IsTargetAliveRA(e) then table.insert(pool, e) end
                 end
@@ -4743,6 +4708,24 @@ do
         Callback = function(val)
             _enemyDropSelected = type(val)=="string" and val or nil
 
+            -- [RA/TA RESERVATION] Update jatah TA begitu user pilih/ganti enemy di
+            -- dropdown, lepas dari TA sedang ON atau masih OFF.
+            -- Mode "id"   -> reservasi by GUID tunggal (_taReservedGuid).
+            -- Mode "name" -> reservasi by NAMA (_taReservedName), exclude SEMUA
+            --                instance musuh dengan nama itu dari pool RA.
+            if _listMode == "id" and _enemyDropSelected then
+                local data = _enemyDataById[_enemyDropSelected]
+                _taReservedGuid = data and data.guid or nil
+                _taReservedName = nil
+            elseif _listMode == "name" and _enemyDropSelected then
+                local data = _enemyDataByName[_enemyDropSelected]
+                _taReservedName = data and data.nm or nil
+                _taReservedGuid = nil
+            else
+                _taReservedGuid = nil
+                _taReservedName = nil
+            end
+
             -- Auto-switch target jika TA sedang running  tidak perlu OFF/ON lagi
             if not _enemyDropSelected then return end
             if not TA.running then return end
@@ -4796,6 +4779,8 @@ do
             _enemyDataByName = {}
             _enemyDropValues = {}
             _enemyDropSelected = nil
+            _taReservedGuid  = nil -- list lama invalid, reservasi ikut direset
+            _taReservedName  = nil
 
             local enemies = GetEnemiesF()
             if #enemies == 0 then
