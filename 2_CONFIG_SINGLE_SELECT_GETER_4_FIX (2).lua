@@ -475,21 +475,100 @@ local ANON_NAME_TEXT      = "Roblox"
 
 local function _getUserIconButton()
     local ok, result = pcall(function()
-        local coreGui   = game:GetService("CoreGui")
-        -- Path asli terkonfirmasi via debug: CoreGui.RobloxGui.WindUI.Window.Frame.Main.TextButton.UserIcon
-        -- (bukan CoreGui.HiddenUI.WindUI... seperti dugaan awal)
-        local robloxGui = coreGui:FindFirstChild("RobloxGui")
-        local windUIGui = robloxGui and robloxGui:FindFirstChild("WindUI")
-        local win       = windUIGui and windUIGui:FindFirstChild("Window")
-        local p = win
-        for _, childName in ipairs({"Frame", "Main", "TextButton", "UserIcon"}) do
-            p = p and p:FindFirstChild(childName)
-            if not p then return nil end
+        -- [v17 FIX] Sniffer v5 KONFIRMASI: WindUI ada di gethui() (Container),
+        -- yang TERPISAH TOTAL dari CoreGui/PlayerGui/game (0 hasil di scan
+        -- ketiganya). Executor ini pakai gethui() sebagai container GUI
+        -- tersembunyi untuk WindUI -- bukan CoreGui seperti dugaan v14-v16.
+        -- Root order: gethui() DULUAN (lokasi asli terkonfirmasi), baru
+        -- CoreGui/PlayerGui sebagai fallback (jaga2 executor lain beda).
+        local roots = {}
+        pcall(function() if gethui then table.insert(roots, gethui()) end end)
+        pcall(function() table.insert(roots, game:GetService("CoreGui")) end)
+        pcall(function()
+            local plr = game:GetService("Players").LocalPlayer
+            table.insert(roots, plr and plr:FindFirstChild("PlayerGui"))
+        end)
+
+        -- Kumpulkan SEMUA ScreenGui "WindUI" dari SEMUA root sekaligus
+        -- (bukan cuma root pertama yang punya hasil -- jaga2 ada beberapa
+        -- instance tersebar/menumpuk dari re-execute).
+        local candidates = {}
+        for _, root in ipairs(roots) do
+            if root then
+                pcall(function()
+                    for _, desc in ipairs(root:GetDescendants()) do
+                        if desc.Name == "WindUI" and desc:IsA("ScreenGui") then
+                            table.insert(candidates, desc)
+                        end
+                    end
+                end)
+            end
         end
-        return p -- container UserIcon (dipakai untuk klik + traversal ke child)
+        if #candidates == 0 then return nil end
+
+        -- Path turunan tetap sama, PERSIS sesuai hasil sniffer:
+        -- WindUI.Window.Frame.Main.TextButton.UserIcon
+        local function resolveFrom(windUIGui)
+            local win = windUIGui:FindFirstChild("Window")
+            local p = win
+            local fastOk = true
+            for _, childName in ipairs({"Frame", "Main", "TextButton", "UserIcon"}) do
+                p = p and p:FindFirstChild(childName)
+                if not p then fastOk = false; break end
+            end
+            if fastOk and p then return p end
+            -- Fallback: scan descendant Window cari "UserIcon" langsung
+            if win then
+                for _, d in ipairs(win:GetDescendants()) do
+                    if d.Name == "UserIcon" then return d end
+                end
+            end
+            return nil
+        end
+
+        -- Pass 1: cari kandidat yang Enabled DAN punya UserIcon valid,
+        -- iterasi dari BELAKANG (instance paling baru duluan).
+        for i = #candidates, 1, -1 do
+            local cand = candidates[i]
+            local isEnabled = true
+            pcall(function() isEnabled = cand.Enabled end)
+            if isEnabled then
+                local found = resolveFrom(cand)
+                if found then return found end
+            end
+        end
+
+        -- Pass 2: kalau tidak ada yang Enabled=true (jarang terjadi), coba
+        -- semua kandidat lain apapun status Enabled-nya, tetap dari belakang.
+        for i = #candidates, 1, -1 do
+            local found = resolveFrom(candidates[i])
+            if found then return found end
+        end
+
+        return nil
     end)
     if ok then return result end
     return nil
+end
+
+-- [v14 FIX] Pencarian rekursif (bukan cuma 1 level FindFirstChild) untuk
+-- foto & label nama di dalam UserIcon -- jaga-jaga strukturnya lebih dalam
+-- atau nama container child ("Frame") berbeda dari dugaan.
+local function _findUserIconParts(btn)
+    local photo, dn, un = nil, nil, nil
+    pcall(function()
+        for _, desc in ipairs(btn:GetDescendants()) do
+            if not photo and desc.Name == "ImageLabel" and desc:IsA("ImageLabel") then
+                photo = desc
+            elseif not dn and desc.Name == "DisplayName" then
+                dn = desc
+            elseif not un and desc.Name == "UserName" then
+                un = desc
+            end
+            if photo and dn and un then break end
+        end
+    end)
+    return photo, dn, un
 end
 
 -- Capture nilai ASLI cuma sekali, SEGERA saat UserIcon pertama kali ditemukan
@@ -501,10 +580,7 @@ local _uiIdentityCaptured = false
 local function _captureUserIdentityOriginal(btn)
     if _uiIdentityCaptured then return end
 
-    local photo = btn:FindFirstChild("ImageLabel")
-    local frame = btn:FindFirstChild("Frame")
-    local dn    = frame and frame:FindFirstChild("DisplayName")
-    local un    = frame and frame:FindFirstChild("UserName")
+    local photo, dn, un = _findUserIconParts(btn)
 
     -- pcall TERPISAH per elemen, supaya kegagalan 1 elemen tidak mengunci
     -- _uiIdentityCaptured=false untuk elemen lain yang sebenarnya valid.
@@ -526,10 +602,7 @@ local function ToggleUserIdentity()
     if not btn or not _uiIdentityCaptured then return end -- belum sempat capture original, jangan toggle dulu
     _uiIdentityAnon = not _uiIdentityAnon
 
-    local photo = btn:FindFirstChild("ImageLabel")
-    local frame = btn:FindFirstChild("Frame")
-    local dn    = frame and frame:FindFirstChild("DisplayName")
-    local un    = frame and frame:FindFirstChild("UserName")
+    local photo, dn, un = _findUserIconParts(btn)
 
     -- Sembunyikan foto (transparency=1) saat anonim, tampilkan lagi saat asli
     if photo and _uiIdentityOriginal.photoTransparency ~= nil then
@@ -558,8 +631,13 @@ task.spawn(function()
     end
     if btn then
         _captureUserIdentityOriginal(btn)
+        -- [v15 FIX] Pasang listener klik di PARENT UserIcon (TextButton,
+        -- Active=true) -- bukan di UserIcon sendiri (ImageLabel, Active=false).
+        -- Terkonfirmasi via sniffer: TextButton induk inilah yang konsisten
+        -- menerima klik di seluruh area kartu profil (foto + Outline + UserIcon).
+        local clickTarget = (btn.Parent and btn.Parent:IsA("GuiButton")) and btn.Parent or btn
         pcall(function()
-            btn.InputBegan:Connect(function(input)
+            clickTarget.InputBegan:Connect(function(input)
                 if input.UserInputType == Enum.UserInputType.MouseButton1
                 or input.UserInputType == Enum.UserInputType.Touch then
                     ToggleUserIdentity()
@@ -567,7 +645,7 @@ task.spawn(function()
             end)
         end)
     else
-        print("[FLa UserIdentity] btn tidak ketemu setelah 4 detik -- path RobloxGui.WindUI.Window.Frame.Main.TextButton.UserIcon mungkin masih perlu penyesuaian")
+        print("[FLa UserIdentity] UserIcon tidak ketemu setelah 4 detik (sudah coba scan seluruh CoreGui) -- fitur toggle nama anonim nonaktif, fitur lain tidak terpengaruh")
     end
 end)
 
@@ -6512,8 +6590,9 @@ do
     end
 
     --  Rotation Map dropdown (Multi, identik 1.lua baris ~6895) 
+    -- [v13 EDIT] Map 1 dihapus dari pilihan rotasi (tidak lagi bisa dipilih/dirotasi)
     local _mapOptNames = {"ALL MAP"}
-    for i = 1, 21 do _mapOptNames[i+1] = "Map "..i end
+    for i = 2, 21 do _mapOptNames[i] = "Map "..i end
 
     local mapSelSet   = {}
     local mapItemRefs = {}
@@ -6545,12 +6624,12 @@ do
             end
 
             if hasAll and not _prevHadAll then
-                -- ALL MAP baru di-CHECK: select semua Map 1-20 + update visual
+                -- ALL MAP baru di-CHECK: select semua Map 2-21 + update visual
                 _prevHadAll = true
-                for i = 1, 21 do mapSelSet[i] = true; MR.selected[i] = true end
-                -- Force visual: inject semua Map 1-20 ke ap.Value via :Select()
+                for i = 2, 21 do mapSelSet[i] = true; MR.selected[i] = true end
+                -- Force visual: inject semua Map 2-21 ke ap.Value via :Select()
                 local allVal = {"ALL MAP"}
-                for i = 1, 21 do table.insert(allVal, "Map "..i) end
+                for i = 2, 21 do table.insert(allVal, "Map "..i) end
                 task.defer(function()
                     pcall(function() mapDD:Select(allVal) end)
                 end)
@@ -6558,7 +6637,7 @@ do
             elseif not hasAll and _prevHadAll then
                 -- ALL MAP baru di-UNCHECK: clear semua
                 _prevHadAll = false
-                for i = 1, 21 do mapSelSet[i] = nil; MR.selected[i] = nil end
+                for i = 2, 21 do mapSelSet[i] = nil; MR.selected[i] = nil end
                 -- Force visual: kosongkan semua via :Select(nil)  ap.Value={}
                 task.defer(function()
                     pcall(function() mapDD:Select({}) end)
@@ -6566,12 +6645,12 @@ do
 
             elseif hasAll and _prevHadAll then
                 -- ALL MAP masih ada, user pilih Map individual tambahan  biarkan
-                for i = 1, 21 do mapSelSet[i] = true; MR.selected[i] = true end
+                for i = 2, 21 do mapSelSet[i] = true; MR.selected[i] = true end
 
             else
                 -- Mode pilihan manual biasa (tanpa ALL MAP)
                 _prevHadAll = false
-                for i = 1, 21 do mapSelSet[i] = nil; MR.selected[i] = nil end
+                for i = 2, 21 do mapSelSet[i] = nil; MR.selected[i] = nil end
                 if type(val) == "table" then
                     for _, v in ipairs(val) do
                         local mi = tonumber(v:match("Map (%d+)"))
@@ -6585,18 +6664,19 @@ do
     _maUpdateMapDDLbl = function()
         -- Sync visual dropdown map sesuai _maMapSelState saat ini
         -- Dipakai oleh ApplyConfig setelah restore data mapSel
+        -- [v13 EDIT] Map 1 dikeluarkan dari perhitungan (2-21 = 20 map)
         if not mapDD then return end
         pcall(function()
             local selVals = {}
             local allOn = true
-            for i = 1, 21 do
+            for i = 2, 21 do
                 if mapSelSet[i] then
                     table.insert(selVals, "Map "..i)
                 else
                     allOn = false
                 end
             end
-            if allOn and #selVals == 21 then
+            if allOn and #selVals == 20 then
                 table.insert(selVals, 1, "ALL MAP")
                 _prevHadAll = true
             else
@@ -9242,22 +9322,10 @@ local function ResolveEntry()
  RAID_LIVE[RAID.raidId] = nil
  RebuildRaidList()
 
- -- [v11 EDIT] STEP 6: TP kembali ke MAP TERAKHIR player berada (bukan
- -- selalu Map 1 lagi). Prioritas sumber: MR.lastMapId (map terakhir Mass
- -- Attack TP ke sana) -> RAID.fromMapId (map sebelum masuk raid, dikirim
- -- server) -> fallback Map 1 (50001) kalau keduanya kosong / di luar range
- -- basemap normal (50001-50020). Reward sudah di-collect bersamaan saat
- -- boss mati (RaidCollectAll di atas).
+ -- [v12 EDIT] STEP 6: SELALU TP ke Map 1 (50001) setelah boss mati,
+ -- tidak lagi cek MR.lastMapId / RAID.fromMapId. Reward sudah di-collect
+ -- bersamaan saat boss mati (RaidCollectAll di atas).
  local _toMapId = 50001
- do
-     local _cand = MR and MR.lastMapId or nil
-     if not (_cand and _cand >= 50001 and _cand <= 50021) then
-         _cand = RAID.fromMapId
-     end
-     if _cand and _cand >= 50001 and _cand <= 50021 then
-         _toMapId = _cand
-     end
- end
  RaidStatusUpdate("[FLa] Go Out -> Map ".. (_toMapId-50000) .."...", Color3.fromRGB(200,100,100))
 
  -- Helper TP -- [v11 EDIT] selalu pakai remote StartLocalPlayerTeleport
@@ -10866,18 +10934,9 @@ function StartAscensionLoop()
     if raidEntry.rawId ~= raidEntry.id then RAID_LIVE[raidEntry.id] = nil end
     if RebuildRaidList then pcall(RebuildRaidList) end
 
-    -- [v11 EDIT] Keluar dari Ascension Tower -> kembali ke MAP TERAKHIR player
-    -- berada (bukan selalu Map 1). Sumber: MR.lastMapId (map terakhir Mass
-    -- Attack TP ke sana), fallback Map 1 (50001) kalau kosong / di luar range
-    -- basemap normal (50001-50020). ASC tidak punya tracking "fromMapId" dari
-    -- server seperti RAID, jadi MR.lastMapId satu-satunya sumber selain default.
+    -- [v12 EDIT] Keluar dari Ascension Tower -> SELALU ke Map 1 (50001),
+    -- tidak lagi cek MR.lastMapId.
     local _ascToMapId = 50001
-    do
-        local _cand = MR and MR.lastMapId or nil
-        if _cand and _cand >= 50001 and _cand <= 50021 then
-            _ascToMapId = _cand
-        end
-    end
     local _exitRe = Remotes:FindFirstChild("QuitRaidsMap")
     if _exitRe then
      pcall(function() _exitRe:FireServer({ currentSlotIndex = 2, toMapId = _ascToMapId }) end)
